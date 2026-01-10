@@ -1,0 +1,35 @@
+# Core API/server
+aiohttp>=3.11,<4
+fastapi>=0.111,<1
+httpx>=0.28,<1
+python-dotenv>=0.19,<2
+requests>=2.31,<3
+starlette>=0.37,<1
+uvicorn>=0.30,<1
+
+# Data + plotting
+matplotlib>=3.8,<4
+networkx>=3.2,<4
+numpy>=2.2,<3
+pandas>=2.2,<3
+
+# Uvicorn runtime extras (production/DEV parity)
+httptools>=0.6,<1
+uvloop>=0.21,<1
+watchfiles>=1.1,<2
+websockets>=15.0,<16
+
+# LLM + config
+pydantic>=2.8,<3
+pydantic-settings>=2.2,<3
+openai>=1.0,<2
+
+# System utilities
+psutil>=5.9,<7
+
+# Vector store (optional, used by Milvus integration)
+pymilvus>=2.4,<3
+
+# Tests
+pytest>=7.4,<9
+pytest-asyncio>=0.21,<1
