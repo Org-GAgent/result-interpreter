@@ -19,4 +19,5 @@ bulk_plans.csv
 scripts/*
 app/services/interpreter/results/
 app/services/interpreter/test/results/
+data/
 

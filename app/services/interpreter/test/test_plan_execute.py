@@ -41,73 +41,49 @@ def create_experiment_csv():
     创建模拟实验数据CSV
     
     实验背景：
-    这是一个药物疗效对比实验。研究人员测试了3种不同的药物（Drug_A, Drug_B, Placebo）
-    对患者血压降低效果的影响。实验持续4周，每周测量一次。
+    某高中对三个班级的学生进行了一次数学测验，想了解不同班级的成绩分布情况。
     
     数据字段：
-    - patient_id: 患者编号
-    - age: 患者年龄
+    - student_id: 学生编号
+    - class: 班级 (A/B/C)
     - gender: 性别 (M/F)
-    - drug_group: 药物组别 (Drug_A, Drug_B, Placebo)
-    - baseline_bp: 基线血压 (mmHg)
-    - week1_bp: 第1周血压
-    - week2_bp: 第2周血压
-    - week3_bp: 第3周血压
-    - week4_bp: 第4周血压 (最终血压)
-    - side_effects: 副作用数量
+    - score: 测验成绩 (0-100)
     """
     
     results_dir = os.path.join(current_dir, "results")
     os.makedirs(results_dir, exist_ok=True)
     
-    csv_path = os.path.join(results_dir, "drug_trial_results.csv")
+    csv_path = os.path.join(results_dir, "math_test_scores.csv")
     
     # 生成模拟数据
-    random.seed(42)  # 固定随机种子以保证可重复性
+    random.seed(42)
     
-    drugs = ["Drug_A", "Drug_B", "Placebo"]
+    classes = ["A", "B", "C"]
     genders = ["M", "F"]
     
-    rows = ["patient_id,age,gender,drug_group,baseline_bp,week1_bp,week2_bp,week3_bp,week4_bp,side_effects"]
+    rows = ["student_id,class,gender,score"]
     
-    patient_id = 1
-    for drug in drugs:
-        for _ in range(20):  # 每组20个患者
-            age = random.randint(35, 70)
+    student_id = 1
+    for cls in classes:
+        for _ in range(8):  # 每班8个学生，共24人
             gender = random.choice(genders)
-            baseline = random.randint(140, 180)  # 高血压患者
             
-            # 根据药物组别模拟不同的降压效果
-            if drug == "Drug_A":
-                # Drug_A 效果最好，每周降低约5-8mmHg
-                w1 = baseline - random.randint(4, 8)
-                w2 = w1 - random.randint(4, 8)
-                w3 = w2 - random.randint(3, 6)
-                w4 = w3 - random.randint(2, 5)
-                side_effects = random.randint(0, 2)
-            elif drug == "Drug_B":
-                # Drug_B 效果中等，每周降低约3-5mmHg
-                w1 = baseline - random.randint(2, 5)
-                w2 = w1 - random.randint(2, 5)
-                w3 = w2 - random.randint(2, 4)
-                w4 = w3 - random.randint(1, 3)
-                side_effects = random.randint(0, 4)
+            # 不同班级成绩分布不同
+            if cls == "A":
+                score = random.randint(75, 98)  # A班成绩较好
+            elif cls == "B":
+                score = random.randint(60, 85)  # B班成绩中等
             else:
-                # Placebo 几乎无效果
-                w1 = baseline - random.randint(-2, 3)
-                w2 = w1 - random.randint(-2, 3)
-                w3 = w2 - random.randint(-2, 2)
-                w4 = w3 - random.randint(-2, 2)
-                side_effects = random.randint(0, 1)
+                score = random.randint(50, 78)  # C班成绩较低
             
-            rows.append(f"{patient_id},{age},{gender},{drug},{baseline},{w1},{w2},{w3},{w4},{side_effects}")
-            patient_id += 1
+            rows.append(f"{student_id},{cls},{gender},{score}")
+            student_id += 1
     
     with open(csv_path, 'w', encoding='utf-8') as f:
         f.write('\n'.join(rows))
     
     logger.info(f"实验数据已生成: {csv_path}")
-    logger.info(f"共 {patient_id - 1} 条记录")
+    logger.info(f"共 {student_id - 1} 条记录")
     
     return csv_path
 
@@ -117,37 +93,28 @@ def get_experiment_description():
     return """
 ## 实验背景
 
-这是一项随机对照临床试验，旨在评估两种新型降压药物（Drug_A 和 Drug_B）与安慰剂（Placebo）相比的疗效和安全性。
+某高中想了解三个班级（A、B、C班）的数学成绩分布情况，进行了一次统一测验。
 
-## 实验设计
+## 数据说明
 
-- **受试者**: 60名高血压患者（基线收缩压 140-180 mmHg）
-- **分组**: 随机分为3组，每组20人
-  - Drug_A 组：接受新药A治疗
-  - Drug_B 组：接受新药B治疗
-  - Placebo 组：接受安慰剂
-- **观察周期**: 4周
-- **测量指标**: 每周测量收缩压，记录副作用
+- **样本**: 24名学生，每班8人
+- **测验**: 满分100分的数学测验
 
 ## 数据字段说明
 
 | 字段 | 说明 |
 |------|------|
-| patient_id | 患者编号 |
-| age | 年龄 |
+| student_id | 学生编号 |
+| class | 班级 (A/B/C) |
 | gender | 性别 (M/F) |
-| drug_group | 药物组别 |
-| baseline_bp | 基线血压 (mmHg) |
-| week1_bp ~ week4_bp | 各周血压测量值 |
-| side_effects | 副作用发生次数 |
+| score | 测验成绩 (0-100) |
 
 ## 分析目标
 
-1. 分析各组患者的基线特征是否均衡
-2. 比较三组药物的降压效果（血压变化趋势）
-3. 评估各组的副作用情况
-4. 得出哪种药物疗效最好且副作用可接受的结论
-5. 生成统计图表支持上述分析
+1. 计算各班级的平均分、最高分、最低分
+2. 比较三个班级的成绩分布（箱线图）
+3. 分析性别对成绩的影响
+4. 给出哪个班级成绩最好的结论
 """
 
 
@@ -187,7 +154,7 @@ def print_plan_tree(repo: PlanRepository, plan_id: int):
 
 def main():
     print("\n" + "="*60)
-    print("   端到端测试: 药物临床试验数据分析")
+    print("   端到端测试: 学生数学成绩分析")
     print("="*60)
     
     # 初始化数据库
@@ -205,23 +172,22 @@ def main():
     
     # Step 3: 创建计划
 #     print("\n[Step 3] 创建分析计划...")
-#     plan_title = "药物临床试验数据分析"
+#     plan_title = "学生数学成绩分析"
 #     plan_description = f"""
 # {experiment_desc}
 
-# 请根据以上实验背景和数据，制定完整的数据分析计划。
+# 请根据以上背景和数据，制定完整的数据分析计划。
 # 需要生成图表来可视化分析结果，所有图表保存到 results 文件夹下。
 # """
     
     # plan = repo.create_plan(title=plan_title, description=plan_description)
-    # plan_id = plan.id
-    plan_id = 18
-    logger.info(f"计划创建成功: ID={plan_id}")
+    plan_id = 25
+    # logger.info(f"计划创建成功: ID={plan_id}")
     
     # Step 4: 使用 PlanDecomposer 分解任务
     # print("\n[Step 4] 任务分解 (调用LLM)...")
     # decomposer = PlanDecomposer(repo=repo)
-    # decomp_result = decomposer.run_plan(plan_id, max_depth=5)
+    # decomp_result = decomposer.run_plan(plan_id, max_depth=3, node_budget=10)
     
     # if decomp_result.stopped_reason:
     #     print(f"  分解停止: {decomp_result.stopped_reason}")
@@ -246,11 +212,11 @@ def main():
     
     executor = PlanExecutorInterpreter(
         plan_id=plan_id,
-        data_file_path=csv_path,
+        data_file_paths=[csv_path],
         output_dir=output_dir,
         llm_provider="qwen",
         docker_image="agent-plotter",
-        docker_timeout=120,
+        docker_timeout=300,
         repo=repo
     )
     

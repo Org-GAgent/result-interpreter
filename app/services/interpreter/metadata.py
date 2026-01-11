@@ -22,6 +22,90 @@ class DatasetMetadata(BaseModel):
 
 class DataProcessor:
     @staticmethod
+    def _process_npy_file(file_path: str) -> DatasetMetadata:
+        data = np.load(file_path, allow_pickle=True)
+        
+        columns_metadata = []
+        dtype_str = str(data.dtype)
+        
+        # Handle structured arrays (with named fields)
+        if data.dtype.names is not None:
+            for name in data.dtype.names:
+                field_data = data[name]
+                flat = field_data.flatten()
+                sample_vals = [x.item() if isinstance(x, np.generic) else x for x in flat[:5]]
+                
+                null_count = 0
+                if np.issubdtype(field_data.dtype, np.number):
+                    null_count = int(np.isnan(field_data).sum()) if field_data.size > 0 else 0
+                
+                unique_count = len(np.unique(flat)) if flat.size < 10000 else -1
+                
+                columns_metadata.append(ColumnMetadata(
+                    name=name,
+                    dtype=str(field_data.dtype),
+                    sample_values=sample_vals,
+                    null_count=null_count,
+                    unique_count=unique_count
+                ))
+            total_rows = data.shape[0] if data.ndim > 0 else 1
+        else:
+            # Regular ndarray - treat dimensions as columns
+            if data.ndim == 1:
+                flat = data.flatten()
+                sample_vals = [x.item() if isinstance(x, np.generic) else x for x in flat[:5]]
+                null_count = int(np.isnan(data).sum()) if np.issubdtype(data.dtype, np.number) else 0
+                unique_count = len(np.unique(flat)) if flat.size < 10000 else -1
+                
+                columns_metadata.append(ColumnMetadata(
+                    name='data',
+                    dtype=dtype_str,
+                    sample_values=sample_vals,
+                    null_count=null_count,
+                    unique_count=unique_count
+                ))
+                total_rows = data.shape[0]
+            elif data.ndim == 2:
+                total_rows = data.shape[0]
+                for i in range(data.shape[1]):
+                    col_data = data[:, i]
+                    sample_vals = [x.item() if isinstance(x, np.generic) else x for x in col_data[:5]]
+                    null_count = int(np.isnan(col_data).sum()) if np.issubdtype(data.dtype, np.number) else 0
+                    unique_count = len(np.unique(col_data)) if col_data.size < 10000 else -1
+                    
+                    columns_metadata.append(ColumnMetadata(
+                        name=f'col_{i}',
+                        dtype=dtype_str,
+                        sample_values=sample_vals,
+                        null_count=null_count,
+                        unique_count=unique_count
+                    ))
+            else:
+                # Higher dimensional arrays - flatten and treat as single column
+                flat = data.flatten()
+                sample_vals = [x.item() if isinstance(x, np.generic) else x for x in flat[:5]]
+                null_count = int(np.isnan(data).sum()) if np.issubdtype(data.dtype, np.number) else 0
+                unique_count = len(np.unique(flat)) if flat.size < 10000 else -1
+                
+                columns_metadata.append(ColumnMetadata(
+                    name=f'data (shape: {data.shape})',
+                    dtype=dtype_str,
+                    sample_values=sample_vals,
+                    null_count=null_count,
+                    unique_count=unique_count
+                ))
+                total_rows = data.shape[0]
+
+        return DatasetMetadata(
+            filename=os.path.basename(file_path),
+            file_format='npy',
+            file_size_bytes=os.path.getsize(file_path),
+            total_rows=total_rows,
+            total_columns=len(columns_metadata),
+            columns=columns_metadata
+        )
+
+    @staticmethod
     def _process_mat_file(file_path: str) -> DatasetMetadata:
         mat = scipy.io.loadmat(file_path)
 
@@ -89,6 +173,9 @@ class DataProcessor:
         
         if file_ext == '.mat':
             return DataProcessor._process_mat_file(file_path)
+        
+        if file_ext == '.npy':
+            return DataProcessor._process_npy_file(file_path)
 
         try:
             if file_ext == '.tsv':
@@ -96,7 +183,7 @@ class DataProcessor:
             elif file_ext == '.csv':
                 df = pd.read_csv(file_path)
             else:
-                raise ValueError(f"Unsupported file format: {file_ext}. Only .csv, .tsv, and .mat are supported.")
+                raise ValueError(f"Unsupported file format: {file_ext}. Only .csv, .tsv, .mat, and .npy are supported.")
         except Exception as e:
             raise ValueError(f"Failed to read file: {e}")
 

@@ -18,18 +18,29 @@ class CodeExecutionResult:
     exit_code: int
 
 class DockerCodeInterpreter:
-    def __init__(self, image: str = "python:3.10-slim", timeout: int = 60, auto_pull: bool = True, work_dir: Optional[str] = None):
+    def __init__(
+        self, 
+        image: str = "python:3.10-slim", 
+        timeout: int = 60, 
+        auto_pull: bool = True, 
+        work_dir: Optional[str] = None,
+        data_dir: Optional[str] = None
+    ):
         """
         初始化 Docker 代码解释器
         :param image: Docker 镜像名称
         :param timeout: 执行超时时间（秒）
         :param auto_pull: 如果镜像不存在，是否自动尝试拉取
-        :param work_dir: 宿主机工作目录，将挂载到容器的 /workspace
+        :param work_dir: 宿主机工作目录，将挂载到容器的 /workspace（用于输出文件）
+        :param data_dir: 宿主机数据目录，将挂载到容器的 /data（用于读取数据文件）
+                        如果不指定，则使用 work_dir
         """
         self.image = image
         self.timeout = timeout
         self.auto_pull = auto_pull
         self.work_dir = os.path.abspath(work_dir) if work_dir else os.getcwd()
+        # 如果指定了 data_dir，单独挂载；否则数据文件也在 work_dir 中
+        self.data_dir = os.path.abspath(data_dir) if data_dir else None
         self.client = None
         
         if docker:
@@ -69,10 +80,19 @@ class DockerCodeInterpreter:
             # 2. 启动容器
             # 使用 python -c 方式运行，通过 command 列表传递避免 shell 注入
             # network_disabled=True 确保安全
-            # 挂载工作目录 到 /workspace
+            # 挂载目录：
+            #   - work_dir -> /workspace (读写，用于输出文件)
+            #   - data_dir -> /data (只读，用于读取数据文件，如果指定了的话)
             volumes = {
                 self.work_dir: {'bind': '/workspace', 'mode': 'rw'}
             }
+            
+            # 如果指定了单独的数据目录，挂载到 /data
+            if self.data_dir and self.data_dir != self.work_dir:
+                volumes[self.data_dir] = {'bind': '/data', 'mode': 'ro'}
+                logger.info(f"Docker 挂载: /workspace={self.work_dir}, /data={self.data_dir}")
+            else:
+                logger.info(f"Docker 挂载: /workspace={self.work_dir}")
             
             container = self.client.containers.run(
                 image=self.image,

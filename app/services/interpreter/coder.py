@@ -1,6 +1,6 @@
 import json
 import logging
-from typing import Optional, Any
+from typing import Optional, Any, List
 
 from pydantic import BaseModel, Field
 
@@ -15,6 +15,9 @@ class CodeTaskResponse(BaseModel):
     """LLM生成代码的响应结构，包含代码和描述。"""
     code: str = Field(..., description="生成的可执行Python代码")
     description: str = Field(..., description="代码描述：说明这段代码想要获取什么信息或分析什么内容")
+    has_visualization: bool = Field(default=False, description="本次代码是否包含可视化（图表、绘图等）")
+    visualization_purpose: Optional[str] = Field(None, description="可视化目的：为什么画这个图，想分析什么，有什么意义")
+    visualization_analysis: Optional[str] = Field(None, description="可视化分析：图表展示什么结果，特征，计算公式，数据细节等")
 
     @classmethod
     def parse_from_llm_output(cls, text: str) -> "CodeTaskResponse":
@@ -51,8 +54,9 @@ class CodeTaskResponse(BaseModel):
 
 class CodeGenerator:
     """
-    Generator that takes metadata, title, and description, 
-    and returns a JSON-compatible object with 'needs_code' and 'code'.
+    Generator that takes metadata list, title, and description, 
+    and returns a JSON-compatible object with code and description.
+    Supports multiple datasets.
     """
 
     def __init__(self, llm_service: Optional[LLMService] = None):
@@ -61,32 +65,52 @@ class CodeGenerator:
         else:
             self.llm = LLMService(client=LLMClient(provider="qwen"))
 
-    def _format_columns(self, metadata: DatasetMetadata) -> str:
+    def _format_columns_for_metadata(self, metadata: DatasetMetadata) -> str:
+        """格式化单个数据集的列信息"""
         cols_summary = []
-        # Handle cases where columns might be dicts or objects depending on Pydantic version/usage
         cols = getattr(metadata, 'columns', [])
-        for col in cols[:20]: # Limit column context
+        for col in cols[:20]:  # Limit column context
             c_name = getattr(col, 'name', str(col))
             c_type = getattr(col, 'dtype', 'unknown')
             c_sample = getattr(col, 'sample_values', [])
-            cols_summary.append(f"- {c_name} ({c_type}): {c_sample}")
+            cols_summary.append(f"  - {c_name} ({c_type}): {c_sample}")
         
         cols_text = "\n".join(cols_summary)
         if len(cols) > 20:
-            cols_text += f"\n... ({len(cols)-20} more columns)"
+            cols_text += f"\n  ... ({len(cols)-20} more columns)"
         return cols_text
 
-    def generate(self, metadata: DatasetMetadata, task_title: str, task_description: str) -> CodeTaskResponse:
+    def _format_datasets(self, metadata_list: List[DatasetMetadata]) -> str:
+        """格式化所有数据集的信息"""
+        datasets_info = []
+        for i, metadata in enumerate(metadata_list, 1):
+            cols_text = self._format_columns_for_metadata(metadata)
+            dataset_info = f"""### Dataset {i}: {metadata.filename}
+- Format: {metadata.file_format}
+- Total Rows: {metadata.total_rows}
+- Total Columns: {metadata.total_columns}
+- Columns:
+{cols_text}"""
+            datasets_info.append(dataset_info)
+        return "\n\n".join(datasets_info)
+
+    def generate(self, metadata_list: List[DatasetMetadata], task_title: str, task_description: str) -> CodeTaskResponse:
         """
         Generates Python code for the given task and data metadata.
+        
+        Args:
+            metadata_list: 数据集元数据列表
+            task_title: 任务标题
+            task_description: 任务描述
         """
-        cols_text = self._format_columns(metadata)
+        # 兼容单个 metadata 的情况
+        if isinstance(metadata_list, DatasetMetadata):
+            metadata_list = [metadata_list]
+        
+        datasets_text = self._format_datasets(metadata_list)
 
         user_prompt = CODER_USER_PROMPT_TEMPLATE.format(
-            filename=metadata.filename,
-            file_format=metadata.file_format,
-            total_rows=metadata.total_rows,
-            cols_text=cols_text,
+            datasets_info=datasets_text,
             task_title=task_title,
             task_description=task_description
         )
@@ -97,12 +121,12 @@ class CodeGenerator:
         response_text = self.llm.chat(prompt=full_prompt)
         return CodeTaskResponse.parse_from_llm_output(response_text)
 
-    def fix_code(self, metadata: DatasetMetadata, task_title: str, task_description: str, code: str, error: str, max_retries: int = 5) -> CodeTaskResponse:
+    def fix_code(self, metadata_list: List[DatasetMetadata], task_title: str, task_description: str, code: str, error: str, max_retries: int = 5) -> CodeTaskResponse:
         """
         尝试修复代码，最多尝试max_retries次。
         
         Args:
-            metadata: 数据集元数据
+            metadata_list: 数据集元数据列表
             task_title: 任务标题
             task_description: 任务描述
             code: 需要修复的代码
@@ -112,7 +136,11 @@ class CodeGenerator:
         Returns:
             CodeTaskResponse: 修复后的代码响应
         """
-        cols_text = self._format_columns(metadata)
+        # 兼容单个 metadata 的情况
+        if isinstance(metadata_list, DatasetMetadata):
+            metadata_list = [metadata_list]
+            
+        datasets_text = self._format_datasets(metadata_list)
         current_code = code
         current_error = error
         
@@ -120,10 +148,7 @@ class CodeGenerator:
             logger.info(f"代码修复尝试 {attempt}/{max_retries}")
             
             user_prompt = CODER_FIX_PROMPT_TEMPLATE.format(
-                filename=metadata.filename,
-                file_format=metadata.file_format,
-                total_rows=metadata.total_rows,
-                cols_text=cols_text,
+                datasets_info=datasets_text,
                 task_title=task_title,
                 task_description=task_description,
                 code=current_code,

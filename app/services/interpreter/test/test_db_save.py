@@ -65,7 +65,7 @@ def test_db_save():
     print("\n开始执行计划...")
     executor = PlanExecutorInterpreter(
         plan_id=plan_id,
-        data_file_path=data_file,
+        data_file_paths=[data_file],
         output_dir=temp_dir,
         repo=repo
     )

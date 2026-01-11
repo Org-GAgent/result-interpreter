@@ -27,6 +27,7 @@ class TestTaskExecutor(unittest.TestCase):
         """创建测试用的临时CSV文件"""
         cls.temp_dir = tempfile.mkdtemp()
         cls.test_csv_path = os.path.join(cls.temp_dir, "test_sales.csv")
+        cls.test_csv_paths = [cls.test_csv_path]  # 列表格式
         
         # 创建测试数据
         csv_content = """Date,Product,Sales,Quantity
@@ -49,7 +50,7 @@ class TestTaskExecutor(unittest.TestCase):
 
     def test_task_type_analysis(self):
         """测试LLM任务类型判断"""
-        executor = TaskExecutor(data_file_path=self.test_csv_path)
+        executor = TaskExecutor(data_file_paths=self.test_csv_paths)
         
         # 测试需要代码的任务
         task_type = executor._analyze_task_type(
@@ -69,7 +70,7 @@ class TestTaskExecutor(unittest.TestCase):
         """测试代码任务执行（需要Docker环境）"""
         print("\n测试代码任务执行...")
         
-        executor = TaskExecutor(data_file_path=self.test_csv_path)
+        executor = TaskExecutor(data_file_paths=self.test_csv_paths)
         result = executor.execute(
             task_title="计算总销售额",
             task_description="读取CSV文件并计算Sales列的总和"
@@ -93,7 +94,7 @@ class TestTaskExecutor(unittest.TestCase):
         """测试纯文本任务执行"""
         print("\n测试纯文本任务执行...")
         
-        executor = TaskExecutor(data_file_path=self.test_csv_path)
+        executor = TaskExecutor(data_file_paths=self.test_csv_paths)
         result = executor.execute(
             task_title="解释数据集结构",
             task_description="请解释这个数据集的结构和各列的含义，不需要代码",
@@ -115,7 +116,7 @@ class TestTaskExecutor(unittest.TestCase):
         print("\n测试便捷函数 execute_task...")
         
         result = execute_task(
-            data_file_path=self.test_csv_path,
+            data_file_paths=self.test_csv_paths,
             task_title="显示数据预览",
             task_description="显示数据的前5行"
         )
