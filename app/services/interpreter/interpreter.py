@@ -21,7 +21,11 @@ from pathlib import Path
 from app.database import init_db
 from app.repository.plan_repository import PlanRepository
 from app.services.plans.plan_decomposer import PlanDecomposer
+from app.services.plans.tree_simplifier import TreeSimplifier, LLMSimilarityMatcher
+from app.llm import LLMClient
 from .plan_execute import PlanExecutorInterpreter, PlanExecutionResult
+from .metadata import DataProcessor
+from .prompts.experiment_design import EXPERIMENT_DESIGN_SYSTEM, EXPERIMENT_DESIGN_USER
 
 logger = logging.getLogger(__name__)
 
@@ -101,14 +105,55 @@ def run_analysis(
         title = Path(data_paths[0]).stem + " 数据分析"
 
     try:
-        # Step 1: 创建计划
-        logger.info(f"[1/3] 创建计划: {title}")
-        plan = repo.create_plan(title=title, description=description)
+        # Step 1: 实验设计（让LLM设计有意义的实验方向）
+        logger.info(f"[1/5] 实验设计...")
+        
+        # 获取数据元信息
+        data_info_parts = []
+        for path in data_paths:
+            try:
+                meta = DataProcessor.get_metadata(path)
+                # 构建元信息文本
+                meta_text = f"文件: {meta.filename}\n"
+                meta_text += f"格式: {meta.file_format}, 大小: {meta.file_size_bytes} bytes\n"
+                meta_text += f"行数: {meta.total_rows}, 列数: {meta.total_columns}\n"
+                if meta.columns:
+                    meta_text += "列信息:\n"
+                    for col in meta.columns[:10]:  # 最多显示10列
+                        meta_text += f"  - {col.name}: {col.dtype}, 样例: {col.sample_values[:3]}\n"
+                data_info_parts.append(meta_text)
+            except Exception as e:
+                data_info_parts.append(f"文件: {Path(path).name} (无法读取元信息: {e})")
+        data_info = "\n\n".join(data_info_parts)
+        
+        # 调用LLM设计实验
+        llm_client = LLMClient(provider=llm_provider)
+        experiment_prompt = f"{EXPERIMENT_DESIGN_SYSTEM}\n\n{EXPERIMENT_DESIGN_USER.format(description=description, data_info=data_info)}"
+        experiment_design = llm_client.chat(experiment_prompt)
+        
+        # 将实验设计添加到描述中
+        enhanced_description = f"""{description}
+
+---
+## 实验设计方案
+
+{experiment_design}
+"""
+        logger.info(f"  实验设计完成，已增强任务描述")
+        print("\n" + "="*60)
+        print("实验设计方案:")
+        print("="*60)
+        print(experiment_design)
+        print("="*60 + "\n")
+
+        # Step 2: 创建计划
+        logger.info(f"[2/5] 创建计划: {title}")
+        plan = repo.create_plan(title=title, description=enhanced_description)
         plan_id = plan.id
         logger.info(f"  计划ID: {plan_id}")
 
-        # Step 2: 分解任务
-        logger.info(f"[2/3] 分解任务 (max_depth={max_depth}, budget={node_budget})")
+        # Step 3: 分解任务
+        logger.info(f"[3/5] 分解任务 (max_depth={max_depth}, budget={node_budget})")
         decomposer = PlanDecomposer(repo=repo)
         decomp_result = decomposer.run_plan(
             plan_id, 
@@ -122,12 +167,28 @@ def run_analysis(
         # 打印计划结构
         print_plan_tree(repo, plan_id)
 
-        # Step 3: 执行计划
-        logger.info(f"[3/3] 执行计划...")
+        # Step 4: 图简化（合并相似节点，生成DAG）
+        logger.info(f"[4/5] 图简化（合并相似节点）...")
+        simplifier = TreeSimplifier(matcher=LLMSimilarityMatcher(threshold=0.9))
+        dag, simplified_plan_id = simplifier.simplify_and_save(plan_id, repo)
+        
+        merge_count = len(dag.merge_map)
+        if merge_count > 0:
+            logger.info(f"  合并了 {merge_count} 个相似节点")
+            logger.info(f"  简化后节点数: {dag.node_count()}")
+            logger.info(f"  新计划ID: {simplified_plan_id}")
+            # 使用简化后的计划执行
+            execution_plan_id = simplified_plan_id
+        else:
+            logger.info(f"  无可合并节点，使用原计划执行")
+            execution_plan_id = plan_id
+
+        # Step 5: 执行计划（按DAG拓扑顺序）
+        logger.info(f"[5/5] 执行计划 (plan_id={execution_plan_id})...")
         os.makedirs(output_dir, exist_ok=True)
         
         executor = PlanExecutorInterpreter(
-            plan_id=plan_id,
+            plan_id=execution_plan_id,
             data_file_paths=data_paths,
             output_dir=output_dir,
             llm_provider=llm_provider,
@@ -140,7 +201,7 @@ def run_analysis(
         logger.info(f"执行完成! 成功: {exec_result.success}")
         
         return AnalysisResult(
-            plan_id=plan_id,
+            plan_id=execution_plan_id,  # 返回实际执行的计划ID
             success=exec_result.success,
             total_tasks=exec_result.total_nodes,
             completed_tasks=exec_result.completed_nodes,

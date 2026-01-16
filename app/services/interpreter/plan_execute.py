@@ -20,6 +20,7 @@ from ...llm import LLMClient
 from app.services.llm.llm_service import LLMService
 from app.repository.plan_repository import PlanRepository
 from app.services.plans.plan_models import PlanNode, PlanTree
+from app.services.plans.tree_simplifier import TreeSimplifier, DAG, DAGNode
 from .task_executer import TaskExecutor, TaskExecutionResult, TaskType
 
 logger = logging.getLogger(__name__)
@@ -148,6 +149,16 @@ class PlanExecutorInterpreter:
         logger.info(f"加载计划树: plan_id={plan_id}")
         self.tree: PlanTree = self.repo.get_plan_tree(plan_id)
         logger.info(f"计划树加载完成: {self.tree.title}, 共 {len(self.tree.nodes)} 个节点")
+        
+        # 转换为 DAG 并计算拓扑顺序
+        simplifier = TreeSimplifier()
+        self.dag: DAG = simplifier.tree_to_dag(self.tree)
+        try:
+            self._topo_order: List[int] = self.dag.topological_sort()
+            logger.info(f"DAG拓扑顺序: {self._topo_order}")
+        except ValueError as e:
+            logger.warning(f"DAG拓扑排序失败: {e}，使用节点ID顺序")
+            self._topo_order = sorted(self.dag.nodes.keys())
         
         # 初始化TaskExecutor（用于执行单个任务）
         # 传递 output_dir 以确保生成的文件保存到正确位置
@@ -300,27 +311,37 @@ class PlanExecutorInterpreter:
 
     def _can_execute_node(self, node_id: int) -> bool:
         """
-        判断节点是否可以执行（纯 DAG 调度）
+        判断节点是否可以执行（DAG 拓扑顺序调度）
         
         可执行条件：
         1. 节点状态为 PENDING
-        2. 所有依赖（dependencies）都已结束（COMPLETED/FAILED/SKIPPED）
+        2. DAG 中所有父节点都已结束（COMPLETED/FAILED/SKIPPED）
+        3. 所有显式依赖（dependencies）都已结束
         
         注意：
-        - 不再要求子节点先完成，执行顺序完全由 dependencies 决定
-        - 父子关系仅用于组织结构，不影响执行顺序
-        - 即使依赖失败，当前节点仍会尝试执行
+        - 执行顺序由 DAG 拓扑结构决定（parent_ids）
+        - 显式依赖作为额外约束
         """
         if self._node_status.get(node_id) != NodeExecutionStatus.PENDING:
             return False
         
-        node = self.tree.nodes.get(node_id)
-        if not node:
+        dag_node = self.dag.nodes.get(node_id)
+        if not dag_node:
             return False
         
-        # 纯 DAG 调度：只检查依赖是否都已结束
-        if not self._all_dependencies_done(node):
-            return False
+        done_statuses = {NodeExecutionStatus.COMPLETED, NodeExecutionStatus.FAILED, NodeExecutionStatus.SKIPPED}
+        
+        # 检查 DAG 父节点是否都已结束
+        for parent_id in dag_node.parent_ids:
+            if self._node_status.get(parent_id) not in done_statuses:
+                return False
+        
+        # 检查显式依赖是否都已结束
+        tree_node = self.tree.nodes.get(node_id)
+        if tree_node and tree_node.dependencies:
+            for dep_id in tree_node.dependencies:
+                if self._node_status.get(dep_id) not in done_statuses:
+                    return False
         
         return True
 
@@ -351,40 +372,63 @@ class PlanExecutorInterpreter:
 
     def _collect_dependency_context(self, node_id: int) -> str:
         """
-        收集依赖节点的执行结果作为上下文（DAG 调度）
+        收集依赖节点和子节点的执行结果作为上下文（DAG拓扑顺序）
         
-        同时收集：
-        1. 显式依赖（dependencies）的执行结果
-        2. 子节点（children）的执行结果（如果有的话）
+        收集内容：
+        1. DAG中的父节点（parent_ids）的执行结果
+        2. 显式依赖（dependencies）的执行结果
+        3. 子节点（child_ids）的执行结果（如果已完成）
         """
-        node = self.tree.nodes.get(node_id)
-        if not node:
-            return ""
-        
         context_parts = []
         collected_ids = set()
         
-        # 1. 收集显式依赖的结果
-        for dep_id in (node.dependencies or []):
-            if dep_id in collected_ids:
-                continue
-            record = self._node_records.get(dep_id)
-            if record and record.status == NodeExecutionStatus.COMPLETED:
-                collected_ids.add(dep_id)
-                dep_context = f"\n### 依赖任务 [{dep_id}] {record.node_name}\n"
-                if record.code_description:
-                    dep_context += f"**分析内容**: {record.code_description}\n"
-                if record.code_output:
-                    dep_context += f"**执行输出**:\n```\n{record.code_output[:2000]}\n```\n"
-                if record.text_response:
-                    dep_context += f"**文本结果**: {record.text_response[:2000]}\n"
-                if record.generated_files:
-                    dep_context += f"**生成文件**: {', '.join(record.generated_files)}\n"
-                context_parts.append(dep_context)
+        # 获取 DAG 节点
+        dag_node = self.dag.nodes.get(node_id)
+        if not dag_node:
+            return ""
         
-        # 2. 收集子节点的结果（如果有且已完成）
-        children = self._get_children_ids(node_id)
-        for child_id in children:
+        tree_node = self.tree.nodes.get(node_id)
+        
+        # 1. 收集 DAG 父节点的结果（拓扑顺序上游节点）
+        for parent_id in dag_node.parent_ids:
+            if parent_id in collected_ids:
+                continue
+            record = self._node_records.get(parent_id)
+            if record and record.status == NodeExecutionStatus.COMPLETED:
+                collected_ids.add(parent_id)
+                parent_context = f"\n### 上游任务 [{parent_id}] {record.node_name}\n"
+                if record.code_description:
+                    parent_context += f"**分析内容**: {record.code_description}\n"
+                if record.code_output:
+                    output = record.code_output[:2000]
+                    parent_context += f"**执行输出**:\n```\n{output}\n```\n"
+                if record.text_response:
+                    parent_context += f"**文本结果**: {record.text_response[:2000]}\n"
+                if record.generated_files:
+                    parent_context += f"**生成文件**: {', '.join(record.generated_files)}\n"
+                context_parts.append(parent_context)
+        
+        # 2. 收集显式依赖的结果
+        if tree_node:
+            for dep_id in (tree_node.dependencies or []):
+                if dep_id in collected_ids:
+                    continue
+                record = self._node_records.get(dep_id)
+                if record and record.status == NodeExecutionStatus.COMPLETED:
+                    collected_ids.add(dep_id)
+                    dep_context = f"\n### 依赖任务 [{dep_id}] {record.node_name}\n"
+                    if record.code_description:
+                        dep_context += f"**分析内容**: {record.code_description}\n"
+                    if record.code_output:
+                        dep_context += f"**执行输出**:\n```\n{record.code_output[:2000]}\n```\n"
+                    if record.text_response:
+                        dep_context += f"**文本结果**: {record.text_response[:2000]}\n"
+                    if record.generated_files:
+                        dep_context += f"**生成文件**: {', '.join(record.generated_files)}\n"
+                    context_parts.append(dep_context)
+        
+        # 3. 收集子节点的结果（DAG中已完成的子节点）
+        for child_id in dag_node.child_ids:
             if child_id in collected_ids:
                 continue
             record = self._node_records.get(child_id)
@@ -624,49 +668,45 @@ class PlanExecutorInterpreter:
 
     def execute(self) -> PlanExecutionResult:
         """
-        执行计划的主入口（DAG 调度）
+        执行计划的主入口（DAG 拓扑顺序调度）
         
         执行流程：
         1. 根据数据库状态初始化所有节点状态
-        2. 循环找出可执行节点（所有依赖都已完成的节点）
-        3. 执行节点
-        4. 重复直到没有可执行节点
+        2. 按 DAG 拓扑顺序依次执行节点
+        3. 每个节点执行前检查父节点和依赖是否完成
+        4. 收集上游节点和子节点的结果作为上下文
         5. 生成分析报告
         
         调度策略：
-        - 纯 DAG 调度：只根据 dependencies 决定执行顺序
-        - 父子关系仅用于组织结构，不影响执行顺序
-        - 无依赖的节点可以并行执行
+        - 按 DAG 拓扑顺序执行（parent_ids 决定顺序）
+        - 同时检查显式依赖（dependencies）
+        - 每个节点可获取其父节点和子节点的执行结果
         
         Returns:
             PlanExecutionResult: 完整的执行结果
         """
-        logger.info(f"开始执行计划（DAG调度）: {self.tree.title} (ID: {self.plan_id})")
+        logger.info(f"开始执行计划（DAG拓扑顺序）: {self.tree.title} (ID: {self.plan_id})")
+        logger.info(f"拓扑顺序: {self._topo_order}")
         started_at = datetime.now().isoformat()
         
         # 根据数据库中的状态初始化所有节点状态，并加载已完成节点的执行记录
         self._initialize_node_states()
         
-        # 循环执行直到没有可执行节点
-        iteration = 0
-        max_iterations = len(self.tree.nodes) * 2  # 防止死循环
-        
-        while iteration < max_iterations:
-            iteration += 1
-            executable = self._get_executable_nodes()
+        # 按拓扑顺序执行
+        for idx, node_id in enumerate(self._topo_order):
+            if self._node_status.get(node_id) != NodeExecutionStatus.PENDING:
+                status = self._node_status.get(node_id)
+                logger.info(f"[{idx+1}/{len(self._topo_order)}] 节点 [{node_id}] 状态为 {status.value}，跳过")
+                continue
             
-            if not executable:
-                logger.info("[DAG调度] 没有更多可执行的节点")
-                break
+            # 检查是否可以执行（父节点和依赖都已完成）
+            if not self._can_execute_node(node_id):
+                logger.warning(f"[{idx+1}/{len(self._topo_order)}] 节点 [{node_id}] 前置条件未满足，标记为 SKIPPED")
+                self._node_status[node_id] = NodeExecutionStatus.SKIPPED
+                continue
             
-            logger.info(f"[DAG调度] 第 {iteration} 轮执行，可执行节点: {executable}")
-            
-            # DAG 调度：按节点 ID 排序保证稳定性（无依赖的节点按 ID 顺序执行）
-            executable.sort(key=lambda nid: nid)
-            
-            # 逐个执行（可以改成并行执行无依赖关系的节点）
-            for node_id in executable:
-                self._execute_single_node(node_id)
+            logger.info(f"[{idx+1}/{len(self._topo_order)}] 执行节点 [{node_id}]")
+            self._execute_single_node(node_id)
         
         # 统计结果
         completed_count = sum(1 for s in self._node_status.values() if s == NodeExecutionStatus.COMPLETED)

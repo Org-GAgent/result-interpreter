@@ -8,7 +8,6 @@ import sys
 import os
 import logging
 
-# 添加项目根目录
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.abspath(os.path.join(current_dir, "../../../../"))
 if project_root not in sys.path:
@@ -18,7 +17,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from app.services.interpreter.interpreter import run_analysis, execute_plan, print_plan_tree
-# 配置日志
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -26,10 +24,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# 数据文件路径
 DATA_DIR = os.path.join(current_dir, "..", "data")
 
-# 数据文件
 DATA_FILES = [
     os.path.join(DATA_DIR, "Gene_expression_table_filtered_normalized.npy"),
     os.path.join(DATA_DIR, "Gene_expression_table_filtered_normalized_ndm.mat"),
@@ -37,7 +33,6 @@ DATA_FILES = [
     os.path.join(DATA_DIR, "sample_cluster_ref_filtered.npy")
 ]
 
-# 分析描述
 DESCRIPTION = """
 ## 数据说明
 
@@ -65,10 +60,9 @@ DESCRIPTION = """
 
 def main():
     print("\n" + "="*60)
-    print("Exploratory Data Analysis and Result Interpretation and Visualization")
+    print("实验数据分析")
     print("="*60)
     
-    # 检查文件
     print("\n数据文件:")
     for f in DATA_FILES:
         exists = "✓" if os.path.exists(f) else "✗"
@@ -77,17 +71,15 @@ def main():
     print("\n分析描述:")
     print(DESCRIPTION[:300] + "...")
     
-    # 确认执行
     confirm = input("\n开始分析? (y/n): ").strip().lower()
     if confirm != 'y':
         print("已取消")
         return
     
-    # 执行分析
     result = run_analysis(
         description=DESCRIPTION,
         data_paths=DATA_FILES,
-        title="Exploratory Data Analysis and Result Interpretation and Visualization",
+        title="实验数据分析",
         output_dir=os.path.join(current_dir, "results"),
         max_depth=5,
         node_budget=50,
@@ -101,7 +93,6 @@ def main():
     #     docker_timeout=7200,
     # )
     
-    # 打印结果
     print("\n" + "="*60)
     print(f"分析完成! 成功: {result.success}")
     print(f"计划ID: {result.plan_id}")

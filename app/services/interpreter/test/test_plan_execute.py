@@ -166,9 +166,9 @@ def main():
     csv_path = create_experiment_csv()
     
     # Step 2: 获取实验描述
-    experiment_desc = get_experiment_description()
-    print("\n[Step 2] 实验描述:")
-    print(experiment_desc[:500] + "...")
+    # experiment_desc = get_experiment_description()
+    # print("\n[Step 2] 实验描述:")
+    # print(experiment_desc[:500] + "...")
     
     # Step 3: 创建计划
 #     print("\n[Step 3] 创建分析计划...")
@@ -181,7 +181,7 @@ def main():
 # """
     
     # plan = repo.create_plan(title=plan_title, description=plan_description)
-    plan_id = 25
+    plan_id = 27
     # logger.info(f"计划创建成功: ID={plan_id}")
     
     # Step 4: 使用 PlanDecomposer 分解任务

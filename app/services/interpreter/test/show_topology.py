@@ -292,10 +292,11 @@ if __name__ == "__main__":
     init_db()
     repo = PlanRepository()
 
-    print_plan_tree(repo, plan_id=27)
+    plan_id = 28
+    print_plan_tree(repo, plan_id=plan_id)
 
-    print_all_dependencies(repo, plan_id=27)
+    print_all_dependencies(repo, plan_id=plan_id)
 
-    print_dep_graph_ascii(repo, plan_id=27)
+    print_dep_graph_ascii(repo, plan_id=plan_id)
 
-    print_dep_edges_only(repo, plan_id=27)
+    print_dep_edges_only(repo, plan_id=plan_id)
