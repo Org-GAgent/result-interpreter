@@ -78,8 +78,17 @@ class DAG:
         """获取所有叶节点（无子节点）"""
         return [n for n in self.nodes.values() if not n.child_ids]
     
-    def topological_sort(self) -> List[int]:
-        """拓扑排序，返回节点ID列表"""
+    def topological_sort(self, reverse: bool = False) -> List[int]:
+        """
+        拓扑排序，返回节点ID列表
+        
+        Args:
+            reverse: 如果为 True，返回反向拓扑顺序（从叶子节点到根节点）
+                     这适用于任务执行场景：先执行子任务，再执行父任务
+        
+        Returns:
+            节点ID列表，按拓扑顺序排列
+        """
         in_degree = {nid: len(n.parent_ids) for nid, n in self.nodes.items()}
         queue = [nid for nid, deg in in_degree.items() if deg == 0]
         result = []
@@ -96,6 +105,8 @@ class DAG:
         if len(result) != len(self.nodes):
             raise ValueError("图中存在环，无法拓扑排序")
         
+        if reverse:
+            return result[::-1]
         return result
     
     def to_outline(self) -> str:
@@ -735,31 +746,53 @@ class TreeSimplifier:
         # 1. 转换为DAG
         dag = self.tree_to_dag(tree)
         
-        # 2. 迭代合并相似节点
+        # 2. 一次性获取所有相似对（只调用一次LLM）
+        nodes = list(dag.nodes.values())
+        similar_pairs = self.matcher.find_similar_pairs(nodes)
+        
+        if not similar_pairs:
+            return dag
+        
+        # 按相似度降序排序
+        similar_pairs.sort(key=lambda x: x[2], reverse=True)
+        
+        # 3. 缓存已判断的pair，避免重复调用LLM
+        # key: (min_id, max_id), value: (should_merge, reason)
+        pair_merge_cache: Dict[Tuple[int, int], bool] = {}
+        
+        # 4. 迭代合并
         for _ in range(max_iterations):
-            nodes = list(dag.nodes.values())
-            similar_pairs = self.matcher.find_similar_pairs(nodes)
-            
-            if not similar_pairs:
-                break
-            
-            # 按相似度降序排序
-            similar_pairs.sort(key=lambda x: x[2], reverse=True)
-            
-            # 合并最相似的一对
             merged = False
+            
             for node_id_1, node_id_2, score in similar_pairs:
+                # 检查节点是否仍存在
                 if node_id_1 not in dag.nodes or node_id_2 not in dag.nodes:
                     continue
                 
-                node1 = dag.nodes[node_id_1]
-                node2 = dag.nodes[node_id_2]
+                # 构建缓存key（确保顺序一致）
+                cache_key = (min(node_id_1, node_id_2), max(node_id_1, node_id_2))
                 
-                if self.matcher.should_merge(node1, node2):
-                    # 保留ID较小的节点
-                    keep_id = min(node_id_1, node_id_2)
-                    remove_id = max(node_id_1, node_id_2)
-                    self.merge_nodes(dag, keep_id, remove_id)
+                # 检查缓存
+                if cache_key in pair_merge_cache:
+                    if not pair_merge_cache[cache_key]:
+                        # 已判断为不可合并，跳过
+                        continue
+                else:
+                    # 未判断过，调用LLM判断
+                    node1 = dag.nodes[node_id_1]
+                    node2 = dag.nodes[node_id_2]
+                    
+                    should = self.matcher.should_merge(node1, node2)
+                    pair_merge_cache[cache_key] = should
+                    
+                    if not should:
+                        continue
+                
+                # 尝试合并
+                keep_id = min(node_id_1, node_id_2)
+                remove_id = max(node_id_1, node_id_2)
+                
+                if self.merge_nodes(dag, keep_id, remove_id):
                     merged = True
                     break
             

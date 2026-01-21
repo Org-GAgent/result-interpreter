@@ -81,8 +81,8 @@ def main():
         data_paths=DATA_FILES,
         title="实验数据分析",
         output_dir=os.path.join(current_dir, "results"),
-        max_depth=5,
-        node_budget=50,
+        max_depth=3,
+        node_budget=40,
     )
 
     # result = execute_plan(
