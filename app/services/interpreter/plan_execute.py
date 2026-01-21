@@ -312,17 +312,15 @@ class PlanExecutorInterpreter:
 
     def _can_execute_node(self, node_id: int) -> bool:
         """
-        判断节点是否可以执行（DAG 拓扑顺序调度）
+        判断节点是否可以执行
         
         可执行条件：
         1. 节点状态为 PENDING
-        2. DAG 中所有子节点都已结束（COMPLETED/FAILED/SKIPPED）
-           （在任务树中，父任务依赖子任务的结果，所以先执行子任务）
-        3. 所有显式依赖（dependencies）都已结束
+        2. 所有子节点都已结束（COMPLETED/FAILED/SKIPPED）
         
         注意：
-        - 执行顺序：叶子节点 → 根节点（反向拓扑排序）
-        - child_ids 是子任务，需要先完成
+        - 执行顺序：叶子节点 → 根节点
+        - 只检查自己的子节点，不检查其它依赖
         """
         if self._node_status.get(node_id) != NodeExecutionStatus.PENDING:
             return False
@@ -333,17 +331,10 @@ class PlanExecutorInterpreter:
         
         done_statuses = {NodeExecutionStatus.COMPLETED, NodeExecutionStatus.FAILED, NodeExecutionStatus.SKIPPED}
         
-        # 检查 DAG 子节点是否都已结束（子任务先完成）
+        # 只检查子节点是否都已结束
         for child_id in dag_node.child_ids:
             if self._node_status.get(child_id) not in done_statuses:
                 return False
-        
-        # 检查显式依赖是否都已结束
-        tree_node = self.tree.nodes.get(node_id)
-        if tree_node and tree_node.dependencies:
-            for dep_id in tree_node.dependencies:
-                if self._node_status.get(dep_id) not in done_statuses:
-                    return False
         
         return True
 
