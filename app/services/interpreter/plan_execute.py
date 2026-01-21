@@ -426,27 +426,48 @@ class PlanExecutorInterpreter:
 
     def _scan_generated_files(self) -> List[str]:
         """
-        扫描 results 目录下新生成的文件
+        扫描 output_dir 及其子目录下生成的文件
+        
+        扫描范围：
+        1. output_dir 根目录下的文件
+        2. output_dir/results 子目录下的文件
         
         Returns:
             List[str]: 文件的相对路径列表（相对于 output_dir）
         """
-        results_dir = self.output_dir / "results"
-        if not results_dir.exists():
-            return []
-        
         files = []
-        for f in results_dir.iterdir():
+        
+        # 扫描 output_dir 根目录
+        for f in self.output_dir.iterdir():
             if f.is_file():
-                # 返回相对路径，格式为 results/filename.ext
-                relative_path = f"results/{f.name}"
-                files.append(relative_path)
+                files.append(f.name)
+        
+        # 扫描 results 子目录
+        results_dir = self.output_dir / "results"
+        if results_dir.exists():
+            for f in results_dir.iterdir():
+                if f.is_file():
+                    # 返回相对路径，格式为 results/filename.ext
+                    relative_path = f"results/{f.name}"
+                    files.append(relative_path)
+        
         return files
 
     def _execute_single_node(self, node_id: int) -> NodeExecutionRecord:
         """执行单个节点"""
         node = self.tree.nodes[node_id]
         logger.info(f"开始执行节点 [{node_id}] {node.name}")
+        
+        # 检查子节点是否有失败的，如果有则警告但继续执行
+        dag_node = self.dag.nodes.get(node_id)
+        if dag_node:
+            failed_children = [
+                cid for cid in dag_node.child_ids 
+                if self._node_status.get(cid) == NodeExecutionStatus.FAILED
+            ]
+            if failed_children:
+                failed_names = [self.tree.nodes[cid].name for cid in failed_children if cid in self.tree.nodes]
+                logger.warning(f"节点 [{node_id}] 有 {len(failed_children)} 个子节点执行失败: {failed_names}，继续执行当前节点")
         
         # 更新状态为运行中
         self._node_status[node_id] = NodeExecutionStatus.RUNNING
