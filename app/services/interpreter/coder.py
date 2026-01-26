@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 from ...llm import get_default_client, LLMClient
 from app.services.llm.llm_service import LLMService
+from app.services.skills.skills_loader import SkillsLoader
 from .metadata import DatasetMetadata
 from .prompts.coder_prompt import CODER_SYSTEM_PROMPT, CODER_USER_PROMPT_TEMPLATE, CODER_FIX_PROMPT_TEMPLATE
 
@@ -64,6 +65,9 @@ class CodeGenerator:
             self.llm = llm_service
         else:
             self.llm = LLMService(client=LLMClient(provider="qwen"))
+        
+        # 初始化 skills loader
+        self._skills_loader = SkillsLoader()
 
     def _format_columns_for_metadata(self, metadata: DatasetMetadata) -> str:
         """格式化单个数据集的列信息"""
@@ -121,6 +125,43 @@ class CodeGenerator:
         response_text = self.llm.chat(prompt=full_prompt)
         return CodeTaskResponse.parse_from_llm_output(response_text)
 
+    def generate_visualization(self, metadata_list: List[DatasetMetadata], task_title: str, task_description: str) -> CodeTaskResponse:
+        """
+        生成可视化代码，会自动加载 visualization-generator skill 来增强提示词。
+        
+        Args:
+            metadata_list: 数据集元数据列表
+            task_title: 任务标题
+            task_description: 任务描述（应包含可视化需求）
+        """
+        # 兼容单个 metadata 的情况
+        if isinstance(metadata_list, DatasetMetadata):
+            metadata_list = [metadata_list]
+        
+        datasets_text = self._format_datasets(metadata_list)
+
+        user_prompt = CODER_USER_PROMPT_TEMPLATE.format(
+            datasets_info=datasets_text,
+            task_title=task_title,
+            task_description=task_description
+        )
+        
+        # 加载 visualization skill
+        self._skills_loader.reset_loaded_skills()  # 重置避免重复
+        viz_skill = self._skills_loader.load_skill("visualization-generator")
+        
+        # 构建带 skill 的 prompt
+        if viz_skill:
+            full_prompt = f"{CODER_SYSTEM_PROMPT}\n\n{viz_skill}\n\n{user_prompt}"
+            logger.info("Loaded visualization-generator skill for code generation")
+        else:
+            # 如果 skill 不存在，回退到普通生成
+            full_prompt = f"{CODER_SYSTEM_PROMPT}\n\n{user_prompt}"
+            logger.warning("visualization-generator skill not found, using default prompt")
+        
+        response_text = self.llm.chat(prompt=full_prompt)
+        return CodeTaskResponse.parse_from_llm_output(response_text)
+
     def fix_code(self, metadata_list: List[DatasetMetadata], task_title: str, task_description: str, code: str, error: str, max_retries: int = 5) -> CodeTaskResponse:
         """
         尝试修复代码，最多尝试max_retries次。
@@ -173,3 +214,64 @@ class CodeGenerator:
         # 所有尝试都失败，返回原代码
         logger.error(f"代码修复失败，已尝试 {max_retries} 次")
         return CodeTaskResponse(code=code, description=f"代码修复失败: 已尝试{max_retries}次")
+
+    def fix_visualization_code(self, metadata_list: List[DatasetMetadata], task_title: str, task_description: str, code: str, error: str, max_retries: int = 5) -> CodeTaskResponse:
+        """
+        尝试修复可视化代码，会加载 visualization-generator skill。
+        
+        Args:
+            metadata_list: 数据集元数据列表
+            task_title: 任务标题
+            task_description: 任务描述
+            code: 需要修复的代码
+            error: 执行错误信息
+            max_retries: 最大重试次数，默认5次
+            
+        Returns:
+            CodeTaskResponse: 修复后的代码响应
+        """
+        # 兼容单个 metadata 的情况
+        if isinstance(metadata_list, DatasetMetadata):
+            metadata_list = [metadata_list]
+            
+        datasets_text = self._format_datasets(metadata_list)
+        current_code = code
+        current_error = error
+        
+        # 加载 visualization skill
+        self._skills_loader.reset_loaded_skills()
+        viz_skill = self._skills_loader.load_skill("visualization-generator")
+        
+        for attempt in range(1, max_retries + 1):
+            logger.info(f"可视化代码修复尝试 {attempt}/{max_retries}")
+            
+            user_prompt = CODER_FIX_PROMPT_TEMPLATE.format(
+                datasets_info=datasets_text,
+                task_title=task_title,
+                task_description=task_description,
+                code=current_code,
+                error=current_error
+            )
+            
+            # 构建带 skill 的 prompt
+            if viz_skill:
+                full_prompt = f"{CODER_SYSTEM_PROMPT}\n\n{viz_skill}\n\n{user_prompt}"
+            else:
+                full_prompt = f"{CODER_SYSTEM_PROMPT}\n\n{user_prompt}"
+            
+            try:
+                response_text = self.llm.chat(prompt=full_prompt)
+                result = CodeTaskResponse.parse_from_llm_output(response_text)
+                
+                # 如果解析成功且代码不为空，返回结果
+                if result.code and result.code.strip():
+                    logger.info(f"可视化代码修复成功 (尝试 {attempt}/{max_retries})")
+                    return result
+                    
+            except Exception as e:
+                logger.warning(f"可视化代码修复尝试 {attempt} 失败: {e}")
+                current_error = f"{error}\n\n修复尝试 {attempt} 失败: {e}"
+        
+        # 所有尝试都失败，返回原代码
+        logger.error(f"可视化代码修复失败，已尝试 {max_retries} 次")
+        return CodeTaskResponse(code=code, description=f"可视化代码修复失败: 已尝试{max_retries}次")

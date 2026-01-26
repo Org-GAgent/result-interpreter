@@ -150,12 +150,13 @@ class PlanExecutorInterpreter:
         self.tree: PlanTree = self.repo.get_plan_tree(plan_id)
         logger.info(f"计划树加载完成: {self.tree.title}, 共 {len(self.tree.nodes)} 个节点")
         
-        # 转换为 DAG 并计算拓扑顺序
+        # 转换为 DAG 并计算拓扑顺序（反向：从叶子到根，先执行子任务）
         simplifier = TreeSimplifier()
         self.dag: DAG = simplifier.tree_to_dag(self.tree)
         try:
-            self._topo_order: List[int] = self.dag.topological_sort()
-            logger.info(f"DAG拓扑顺序: {self._topo_order}")
+            # 使用反向拓扑排序：先执行叶子节点（子任务），再执行父节点
+            self._topo_order: List[int] = self.dag.topological_sort(reverse=True)
+            logger.info(f"DAG拓扑顺序（叶子→根）: {self._topo_order}")
         except ValueError as e:
             logger.warning(f"DAG拓扑排序失败: {e}，使用节点ID顺序")
             self._topo_order = sorted(self.dag.nodes.keys())
@@ -311,16 +312,15 @@ class PlanExecutorInterpreter:
 
     def _can_execute_node(self, node_id: int) -> bool:
         """
-        判断节点是否可以执行（DAG 拓扑顺序调度）
+        判断节点是否可以执行
         
         可执行条件：
         1. 节点状态为 PENDING
-        2. DAG 中所有父节点都已结束（COMPLETED/FAILED/SKIPPED）
-        3. 所有显式依赖（dependencies）都已结束
+        2. 所有子节点都已结束（COMPLETED/FAILED/SKIPPED）
         
         注意：
-        - 执行顺序由 DAG 拓扑结构决定（parent_ids）
-        - 显式依赖作为额外约束
+        - 执行顺序：叶子节点 → 根节点
+        - 只检查自己的子节点，不检查其它依赖
         """
         if self._node_status.get(node_id) != NodeExecutionStatus.PENDING:
             return False
@@ -331,17 +331,10 @@ class PlanExecutorInterpreter:
         
         done_statuses = {NodeExecutionStatus.COMPLETED, NodeExecutionStatus.FAILED, NodeExecutionStatus.SKIPPED}
         
-        # 检查 DAG 父节点是否都已结束
-        for parent_id in dag_node.parent_ids:
-            if self._node_status.get(parent_id) not in done_statuses:
+        # 只检查子节点是否都已结束
+        for child_id in dag_node.child_ids:
+            if self._node_status.get(child_id) not in done_statuses:
                 return False
-        
-        # 检查显式依赖是否都已结束
-        tree_node = self.tree.nodes.get(node_id)
-        if tree_node and tree_node.dependencies:
-            for dep_id in tree_node.dependencies:
-                if self._node_status.get(dep_id) not in done_statuses:
-                    return False
         
         return True
 
@@ -372,12 +365,15 @@ class PlanExecutorInterpreter:
 
     def _collect_dependency_context(self, node_id: int) -> str:
         """
-        收集依赖节点和子节点的执行结果作为上下文（DAG拓扑顺序）
+        收集依赖节点的执行结果作为上下文
+        
+        在任务树中，执行顺序是从叶子到根：
+        - 子节点（child_ids）先执行，结果作为当前节点的输入
+        - 显式依赖（dependencies）的结果也需要收集
         
         收集内容：
-        1. DAG中的父节点（parent_ids）的执行结果
+        1. 子节点（child_ids）的执行结果（主要上下文来源）
         2. 显式依赖（dependencies）的执行结果
-        3. 子节点（child_ids）的执行结果（如果已完成）
         """
         context_parts = []
         collected_ids = set()
@@ -389,24 +385,23 @@ class PlanExecutorInterpreter:
         
         tree_node = self.tree.nodes.get(node_id)
         
-        # 1. 收集 DAG 父节点的结果（拓扑顺序上游节点）
-        for parent_id in dag_node.parent_ids:
-            if parent_id in collected_ids:
+        # 1. 收集子节点的结果（子任务先执行，结果作为输入）
+        for child_id in dag_node.child_ids:
+            if child_id in collected_ids:
                 continue
-            record = self._node_records.get(parent_id)
+            record = self._node_records.get(child_id)
             if record and record.status == NodeExecutionStatus.COMPLETED:
-                collected_ids.add(parent_id)
-                parent_context = f"\n### 上游任务 [{parent_id}] {record.node_name}\n"
+                collected_ids.add(child_id)
+                child_context = f"\n### 子任务 [{child_id}] {record.node_name}\n"
                 if record.code_description:
-                    parent_context += f"**分析内容**: {record.code_description}\n"
+                    child_context += f"**分析内容**: {record.code_description}\n"
                 if record.code_output:
-                    output = record.code_output[:2000]
-                    parent_context += f"**执行输出**:\n```\n{output}\n```\n"
+                    child_context += f"**执行输出**:\n```\n{record.code_output[:2000]}\n```\n"
                 if record.text_response:
-                    parent_context += f"**文本结果**: {record.text_response[:2000]}\n"
+                    child_context += f"**文本结果**: {record.text_response[:2000]}\n"
                 if record.generated_files:
-                    parent_context += f"**生成文件**: {', '.join(record.generated_files)}\n"
-                context_parts.append(parent_context)
+                    child_context += f"**生成文件**: {', '.join(record.generated_files)}\n"
+                context_parts.append(child_context)
         
         # 2. 收集显式依赖的结果
         if tree_node:
@@ -427,49 +422,52 @@ class PlanExecutorInterpreter:
                         dep_context += f"**生成文件**: {', '.join(record.generated_files)}\n"
                     context_parts.append(dep_context)
         
-        # 3. 收集子节点的结果（DAG中已完成的子节点）
-        for child_id in dag_node.child_ids:
-            if child_id in collected_ids:
-                continue
-            record = self._node_records.get(child_id)
-            if record and record.status == NodeExecutionStatus.COMPLETED:
-                collected_ids.add(child_id)
-                child_context = f"\n### 子任务 [{child_id}] {record.node_name}\n"
-                if record.code_description:
-                    child_context += f"**分析内容**: {record.code_description}\n"
-                if record.code_output:
-                    child_context += f"**执行输出**:\n```\n{record.code_output[:2000]}\n```\n"
-                if record.text_response:
-                    child_context += f"**文本结果**: {record.text_response[:2000]}\n"
-                if record.generated_files:
-                    child_context += f"**生成文件**: {', '.join(record.generated_files)}\n"
-                context_parts.append(child_context)
-        
         return "\n".join(context_parts)
 
     def _scan_generated_files(self) -> List[str]:
         """
-        扫描 results 目录下新生成的文件
+        扫描 output_dir 及其子目录下生成的文件
+        
+        扫描范围：
+        1. output_dir 根目录下的文件
+        2. output_dir/results 子目录下的文件
         
         Returns:
             List[str]: 文件的相对路径列表（相对于 output_dir）
         """
-        results_dir = self.output_dir / "results"
-        if not results_dir.exists():
-            return []
-        
         files = []
-        for f in results_dir.iterdir():
+        
+        # 扫描 output_dir 根目录
+        for f in self.output_dir.iterdir():
             if f.is_file():
-                # 返回相对路径，格式为 results/filename.ext
-                relative_path = f"results/{f.name}"
-                files.append(relative_path)
+                files.append(f.name)
+        
+        # 扫描 results 子目录
+        results_dir = self.output_dir / "results"
+        if results_dir.exists():
+            for f in results_dir.iterdir():
+                if f.is_file():
+                    # 返回相对路径，格式为 results/filename.ext
+                    relative_path = f"results/{f.name}"
+                    files.append(relative_path)
+        
         return files
 
     def _execute_single_node(self, node_id: int) -> NodeExecutionRecord:
         """执行单个节点"""
         node = self.tree.nodes[node_id]
         logger.info(f"开始执行节点 [{node_id}] {node.name}")
+        
+        # 检查子节点是否有失败的，如果有则警告但继续执行
+        dag_node = self.dag.nodes.get(node_id)
+        if dag_node:
+            failed_children = [
+                cid for cid in dag_node.child_ids 
+                if self._node_status.get(cid) == NodeExecutionStatus.FAILED
+            ]
+            if failed_children:
+                failed_names = [self.tree.nodes[cid].name for cid in failed_children if cid in self.tree.nodes]
+                logger.warning(f"节点 [{node_id}] 有 {len(failed_children)} 个子节点执行失败: {failed_names}，继续执行当前节点")
         
         # 更新状态为运行中
         self._node_status[node_id] = NodeExecutionStatus.RUNNING
@@ -490,11 +488,17 @@ class PlanExecutorInterpreter:
         # 记录执行前的文件
         files_before = set(self._scan_generated_files())
         
+        # 判断是否为可视化任务：
+        # 1. 如果节点 metadata 中有 is_visualization 标记则使用该值
+        # 2. 否则默认为 True（因为数据分析系统通常需要可视化能力）
+        is_visualization = node.metadata.get("is_visualization", True)
+        
         # 使用 TaskExecutor 执行任务，依赖结果通过 subtask_results 参数传递
         result: TaskExecutionResult = self.task_executor.execute(
             task_title=node.name,
             task_description=task_description,
-            subtask_results=dependency_context  # 传递依赖结果给信息收集和任务执行阶段
+            subtask_results=dependency_context,  # 传递依赖结果给信息收集和任务执行阶段
+            is_visualization=is_visualization
         )
         
         # 记录执行后的文件，找出新生成的

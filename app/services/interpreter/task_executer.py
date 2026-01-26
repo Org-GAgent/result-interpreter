@@ -374,7 +374,8 @@ class TaskExecutor:
         task_description: str,
         subtask_results: str = "",
         gathered_info: str = "",
-        max_fix_attempts: int = 5
+        max_fix_attempts: int = 5,
+        is_visualization: bool = False
     ) -> TaskExecutionResult:
         """
         执行需要代码的任务
@@ -385,6 +386,7 @@ class TaskExecutor:
             subtask_results: 子任务结果
             gathered_info: 信息收集阶段获取的额外信息
             max_fix_attempts: 最大修复尝试次数，默认5次
+            is_visualization: 是否为可视化任务，如果是则使用 visualization skill
         """
         # 1. 生成初始代码（包含收集到的额外信息）
         logger.info("正在生成代码...")
@@ -396,11 +398,20 @@ class TaskExecutor:
         if gathered_info:
             enhanced_description += f"\n\n## Additional Gathered Information:\n{gathered_info}"
         
-        code_response = self.code_generator.generate(
-            metadata_list=self.metadata_list,
-            task_title=task_title,
-            task_description=enhanced_description
-        )
+        # 根据任务类型选择不同的生成方法
+        if is_visualization:
+            logger.info("使用 visualization skill 生成可视化代码...")
+            code_response = self.code_generator.generate_visualization(
+                metadata_list=self.metadata_list,
+                task_title=task_title,
+                task_description=enhanced_description
+            )
+        else:
+            code_response = self.code_generator.generate(
+                metadata_list=self.metadata_list,
+                task_title=task_title,
+                task_description=enhanced_description
+            )
         
         if not code_response.code or not code_response.code.strip():
             return TaskExecutionResult(
@@ -446,14 +457,26 @@ class TaskExecutor:
             if attempt < max_fix_attempts:
                 logger.info(f"调用fix_code修复代码...")
                 error_info = f"Exit Code: {exec_result.exit_code}\nStderr: {exec_result.error}\nStdout: {exec_result.output}"
-                fix_response = self.code_generator.fix_code(
-                    metadata_list=self.metadata_list,
-                    task_title=task_title,
-                    task_description=task_description,
-                    code=current_code,
-                    error=error_info,
-                    max_retries=3
-                )
+                
+                # 根据任务类型选择不同的修复方法
+                if is_visualization:
+                    fix_response = self.code_generator.fix_visualization_code(
+                        metadata_list=self.metadata_list,
+                        task_title=task_title,
+                        task_description=task_description,
+                        code=current_code,
+                        error=error_info,
+                        max_retries=3
+                    )
+                else:
+                    fix_response = self.code_generator.fix_code(
+                        metadata_list=self.metadata_list,
+                        task_title=task_title,
+                        task_description=task_description,
+                        code=current_code,
+                        error=error_info,
+                        max_retries=3
+                    )
                 
                 if fix_response.code and fix_response.code.strip():
                     current_code = fix_response.code
@@ -537,7 +560,8 @@ class TaskExecutor:
         task_description: str,
         subtask_results: str = "",
         force_code: Optional[bool] = None,
-        skip_info_gathering: bool = False
+        skip_info_gathering: bool = False,
+        is_visualization: bool = False
     ) -> TaskExecutionResult:
         """
         执行任务的主入口
@@ -549,6 +573,7 @@ class TaskExecutor:
             subtask_results: 子任务结果（用于非叶子节点）
             force_code: 强制指定任务类型（True=代码任务, False=文本任务, None=自动判断）
             skip_info_gathering: 是否跳过信息收集阶段
+            is_visualization: 是否为可视化任务，如果是则使用 visualization skill 生成代码
         """
         logger.info(f"开始执行任务: {task_title}")
         
@@ -583,7 +608,8 @@ class TaskExecutor:
                 task_title, 
                 task_description,
                 subtask_results=subtask_results,
-                gathered_info=gathered_info
+                gathered_info=gathered_info,
+                is_visualization=is_visualization
             )
         else:
             result = self._execute_text_task(
@@ -611,6 +637,7 @@ def execute_task(
     task_description: str,
     subtask_results: str = "",
     skip_info_gathering: bool = False,
+    is_visualization: bool = False,
     **kwargs
 ) -> TaskExecutionResult:
     """
@@ -622,6 +649,7 @@ def execute_task(
         task_description: 任务描述
         subtask_results: 子任务结果（可选）
         skip_info_gathering: 是否跳过信息收集阶段
+        is_visualization: 是否为可视化任务，如果是则使用 visualization skill
         **kwargs: 传递给TaskExecutor的其他参数
         
     Returns:
@@ -632,5 +660,6 @@ def execute_task(
         task_title=task_title, 
         task_description=task_description,
         subtask_results=subtask_results,
-        skip_info_gathering=skip_info_gathering
+        skip_info_gathering=skip_info_gathering,
+        is_visualization=is_visualization
     )
