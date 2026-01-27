@@ -1,221 +1,304 @@
 # Metadata 模块
 
-该模块提供数据集元数据提取功能，用于分析和描述数据文件的结构信息。
+该模块提供通用数据文件元数据提取功能，通过 LLM 生成解析代码来支持任意文件格式。
 
 ## 概述
 
-`metadata.py` 模块负责从各种格式的数据文件中提取元数据信息，包括：
-- 文件基本信息（文件名、格式、大小）
-- 数据维度（行数、列数）
-- 列级详细信息（数据类型、样本值、空值统计、唯一值统计）
+`metadata.py` 模块负责从各种格式的数据文件中提取元数据信息。核心特点：
+- **通用性**：通过 LLM 动态生成解析代码，支持任意文件格式
+- **智能解析**：自动检测文件类型，提取关键元数据
+- **自动修复**：代码执行失败时自动调用 LLM 修复
+
+## 模块架构
+
+```
+interpreter/
+├── metadata.py           # 核心模块：FileMetadata, LLMMetadataParser, get_metadata()
+├── code_executor.py      # 本地代码执行器：CodeExecutor, ExecutionResult
+└── prompts/
+    └── metadata_parser_prompt.py  # LLM 提示词模板
+```
 
 ## 支持的文件格式
 
-| 格式 | 扩展名 | 说明 |
-|------|--------|------|
-| CSV | `.csv` | 逗号分隔值文件 |
-| TSV | `.tsv` | 制表符分隔值文件 |
-| MAT | `.mat` | MATLAB 数据文件 |
+由于使用 LLM 动态生成解析代码，理论上支持任意文件格式：
+
+| 类型 | 扩展名 | 返回的 file_type |
+|------|--------|------------------|
+| 表格数据 | `.csv`, `.tsv`, `.xlsx`, `.parquet` | `tabular` |
+| 数组数据 | `.npy`, `.mat`, `.hdf5` | `array` |
+| 图像数据 | `.png`, `.jpg`, `.tiff` | `image` |
+| JSON 数据 | `.json` | `json` |
+| 其他 | 任意 | 由 LLM 决定 |
 
 ## 数据模型
 
-### ColumnMetadata
+### FileMetadata
 
-列级元数据模型，描述单个列的详细信息。
-
-```python
-class ColumnMetadata(BaseModel):
-    name: str           # 列名
-    dtype: str          # 数据类型
-    sample_values: List[Any]  # 样本值（最多5个）
-    null_count: int     # 空值数量
-    unique_count: int   # 唯一值数量
-```
-
-**字段说明：**
-
-| 字段 | 类型 | 描述 |
-|------|------|------|
-| `name` | `str` | 列名称 |
-| `dtype` | `str` | 数据类型（如 `int64`, `float64`, `object` 等） |
-| `sample_values` | `List[Any]` | 该列的前5个非空样本值 |
-| `null_count` | `int` | 该列中空值/缺失值的数量 |
-| `unique_count` | `int` | 该列中唯一值的数量（MAT文件大数据时为-1） |
-
-### DatasetMetadata
-
-数据集元数据模型，描述整个数据文件的信息。
+通用文件元数据模型，包含基础信息和 LLM 解析结果。
 
 ```python
-class DatasetMetadata(BaseModel):
-    filename: str           # 文件名
-    file_format: str        # 文件格式
-    file_size_bytes: int    # 文件大小（字节）
-    total_rows: int         # 总行数
-    total_columns: int      # 总列数
-    columns: List[ColumnMetadata]  # 列元数据列表
+class FileMetadata(BaseModel):
+    # ===== 通用信息（直接提取）=====
+    filename: str                           # 文件名（不含路径）
+    file_path: str                          # 完整文件路径
+    file_extension: str                     # 文件扩展名
+    file_size_bytes: int                    # 文件大小（字节）
+    mime_type: Optional[str] = None         # MIME 类型
+    is_binary: bool = False                 # 是否为二进制文件
+    encoding: Optional[str] = None          # 文件编码（文本文件）
+    created_time: Optional[str] = None      # 创建时间（ISO 格式）
+    modified_time: Optional[str] = None     # 修改时间（ISO 格式）
+    
+    # ===== 预览信息 =====
+    raw_preview: Optional[str] = None       # 文件头部预览
+    preview_lines: int = 0                  # 预览行数（文本文件）
+    preview_bytes: int = 0                  # 预览字节数
+    
+    # ===== LLM 解析结果 =====
+    parsed_content: Optional[dict] = None   # LLM 生成代码解析后的结果
 ```
 
-**字段说明：**
+### parsed_content 结构
 
-| 字段 | 类型 | 描述 |
-|------|------|------|
-| `filename` | `str` | 文件名（不含路径） |
-| `file_format` | `str` | 文件格式（`csv`, `tsv`, `mat`） |
-| `file_size_bytes` | `int` | 文件大小（字节） |
-| `total_rows` | `int` | 数据总行数 |
-| `total_columns` | `int` | 数据总列数 |
-| `columns` | `List[ColumnMetadata]` | 所有列的元数据列表 |
+根据文件类型不同，`parsed_content` 字典包含不同的字段：
 
-## DataProcessor 类
+**表格数据 (file_type: "tabular")**
+```python
+{
+    "file_type": "tabular",
+    "total_rows": 10000,
+    "total_columns": 5,
+    "columns": [  # 最多前 20 列
+        {
+            "name": "id",
+            "dtype": "int64",
+            "sample_values": [1, 2, 3],  # 最多 3 个
+            "null_count": 0
+        },
+        ...
+    ],
+    "sample_rows": [...]  # 最多前 5 行
+}
+```
 
-数据处理器类，提供静态方法用于提取数据文件的元数据。
+**数组数据 (file_type: "array")**
+```python
+{
+    "file_type": "array",
+    "shape": [100, 50],
+    "dtype": "float64",
+    "ndim": 2,
+    "size": 5000,
+    "sample_values": [1.0, 2.0, 3.0],  # 最多 3 个
+    "min": 0.0,
+    "max": 100.0,
+    "mean": 50.0
+}
+```
 
-### 方法
+**图像数据 (file_type: "image")**
+```python
+{
+    "file_type": "image",
+    "width": 1920,
+    "height": 1080,
+    "channels": 3,
+    "format": "PNG",
+    "mode": "RGB"
+}
+```
 
-#### `get_metadata(file_path: str) -> DatasetMetadata`
+**JSON 数据 (file_type: "json")**
+```python
+{
+    "file_type": "json",
+    "keys": ["key1", "key2", ...],  # 最多 20 个
+    "total_keys": 50,
+    "sample_data": {...}
+}
+```
 
-从指定文件路径提取元数据。
+## 核心组件
 
-**参数：**
-- `file_path` (`str`): 数据文件的完整路径
+### get_metadata() 函数
 
-**返回：**
-- `DatasetMetadata`: 数据集元数据对象
-
-**异常：**
-- `FileNotFoundError`: 文件不存在
-- `ValueError`: 不支持的文件格式或文件读取失败
-
-**示例：**
+**单一入口点**：获取文件完整元数据，包含 LLM 解析结果。
 
 ```python
-from app.services.interpreter.metadata import DataProcessor
-
-# 提取 CSV 文件元数据
-metadata = DataProcessor.get_metadata("/path/to/sales_data.csv")
-
-print(f"文件名: {metadata.filename}")
-print(f"行数: {metadata.total_rows}")
-print(f"列数: {metadata.total_columns}")
-
-for col in metadata.columns:
-    print(f"  - {col.name}: {col.dtype}, 空值: {col.null_count}")
+def get_metadata(file_path: str, max_attempts: int = 3) -> FileMetadata:
+    """
+    获取文件元数据（包含 LLM 解析的 parsed_content）
+    
+    Args:
+        file_path: 文件路径
+        max_attempts: 最大重试次数（代码执行失败时自动修复重试）
+    
+    Returns:
+        FileMetadata: 包含完整元数据的对象
+    """
 ```
 
-#### `_process_mat_file(file_path: str) -> DatasetMetadata` (内部方法)
+### LLMMetadataParser
 
-专门处理 MATLAB `.mat` 文件的内部方法。
+调用 LLM 生成解析代码并执行。
 
-**特殊处理：**
-- 过滤 MATLAB 内部键（以 `__` 开头的键）
-- 处理多维数组，使用第一维度作为行数估计
-- 对大数据集（>10000元素）跳过唯一值计算以提高性能
-- 将 NumPy 标量转换为 Python 原生类型以支持 JSON 序列化
+```python
+class LLMMetadataParser:
+    def __init__(self, llm_client=None, provider: str = "qwen"):
+        ...
+    
+    def parse(self, file_path: str, max_attempts: int = 3) -> FileMetadata:
+        """解析文件并返回完整元数据"""
+        ...
+    
+    def parse_metadata(self, metadata: FileMetadata, max_attempts: int = 3) -> FileMetadata:
+        """基于已有基础元数据，调用 LLM 解析并填充 parsed_content"""
+        ...
+```
+
+### FileMetadataExtractor
+
+提取文件基础信息（不调用 LLM）。
+
+```python
+class FileMetadataExtractor:
+    @staticmethod
+    def extract(file_path: str, preview_lines: int = 20, preview_bytes: int = 512) -> FileMetadata:
+        """提取文件基础元数据（不含 parsed_content）"""
+        ...
+```
+
+### CodeExecutor
+
+本地 Python 代码执行器（用于执行 LLM 生成的解析代码）。
+
+```python
+class CodeExecutor:
+    def execute(self, code: str, globals_dict: dict = None) -> ExecutionResult:
+        """执行 Python 代码"""
+        ...
+    
+    def execute_with_retry(self, code: str, max_attempts: int = 3, 
+                           fix_code_func=None, **kwargs) -> ExecutionResult:
+        """执行代码，失败时调用 fix_code_func 修复并重试"""
+        ...
+```
 
 ## 使用示例
 
 ### 基本用法
 
 ```python
-from app.services.interpreter.metadata import DataProcessor, DatasetMetadata
+from app.services.interpreter.metadata import get_metadata
 
-# 单个文件
-metadata = DataProcessor.get_metadata("data/sales.csv")
-print(metadata.model_dump_json(indent=2))
+# 获取文件元数据（自动调用 LLM 解析）
+metadata = get_metadata("data/sales.csv")
+
+print(f"文件名: {metadata.filename}")
+print(f"扩展名: {metadata.file_extension}")
+print(f"大小: {metadata.file_size_bytes} bytes")
+
+# 访问 LLM 解析结果
+if metadata.parsed_content:
+    pc = metadata.parsed_content
+    print(f"类型: {pc.get('file_type')}")
+    print(f"行数: {pc.get('total_rows')}")
+    print(f"列数: {pc.get('total_columns')}")
+    
+    for col in pc.get("columns", [])[:5]:
+        print(f"  - {col['name']}: {col['dtype']}")
 ```
 
 ### 多数据集处理
 
 ```python
-from app.services.interpreter.metadata import DataProcessor
-from typing import List
+from app.services.interpreter.metadata import get_metadata
 
 file_paths = [
     "data/sales_2023.csv",
-    "data/sales_2024.csv",
-    "data/products.tsv"
+    "data/model_weights.npy",
+    "data/config.json"
 ]
 
-metadata_list: List[DatasetMetadata] = []
 for path in file_paths:
-    metadata_list.append(DataProcessor.get_metadata(path))
-
-# 打印所有数据集摘要
-for meta in metadata_list:
-    print(f"{meta.filename}: {meta.total_rows} 行 x {meta.total_columns} 列")
+    meta = get_metadata(path)
+    pc = meta.parsed_content or {}
+    file_type = pc.get("file_type", "unknown")
+    print(f"{meta.filename}: {file_type}")
 ```
 
-### 与代码生成器集成
+### 仅提取基础信息（不调用 LLM）
 
 ```python
-from app.services.interpreter.metadata import DataProcessor
-from app.services.interpreter.coder import CodeGenerator
+from app.services.interpreter.metadata import FileMetadataExtractor
 
-# 准备多个数据集的元数据
-metadata_list = [
-    DataProcessor.get_metadata("data/orders.csv"),
-    DataProcessor.get_metadata("data/customers.csv")
-]
-
-# 传递给代码生成器
-generator = CodeGenerator()
-response = generator.generate(
-    metadata_list=metadata_list,
-    task_title="客户订单分析",
-    task_description="分析各客户的订单金额分布"
-)
-
-print(response.code)
+# 只提取基础信息，不调用 LLM
+basic_meta = FileMetadataExtractor.extract("data/large_file.csv")
+print(f"文件: {basic_meta.filename}")
+print(f"MIME: {basic_meta.mime_type}")
+print(f"编码: {basic_meta.encoding}")
+print(f"预览:\n{basic_meta.raw_preview}")
 ```
 
-## 输出示例
+### 自定义 LLM 客户端
 
-对于一个 CSV 文件，`get_metadata` 返回的结构示例：
+```python
+from app.services.interpreter.metadata import LLMMetadataParser
+from app.llm import LLMClient
 
-```json
-{
-  "filename": "sales_data.csv",
-  "file_format": "csv",
-  "file_size_bytes": 15360,
-  "total_rows": 500,
-  "total_columns": 4,
-  "columns": [
-    {
-      "name": "Date",
-      "dtype": "object",
-      "sample_values": ["2023-01-01", "2023-01-02", "2023-01-03", "2023-01-04", "2023-01-05"],
-      "null_count": 0,
-      "unique_count": 365
-    },
-    {
-      "name": "Product",
-      "dtype": "object",
-      "sample_values": ["Apple", "Banana", "Orange", "Grape", "Mango"],
-      "null_count": 0,
-      "unique_count": 5
-    },
-    {
-      "name": "Quantity",
-      "dtype": "int64",
-      "sample_values": [10, 25, 15, 30, 20],
-      "null_count": 0,
-      "unique_count": 45
-    },
-    {
-      "name": "Revenue",
-      "dtype": "float64",
-      "sample_values": [99.99, 149.50, 75.00, 200.00, 125.75],
-      "null_count": 2,
-      "unique_count": 150
-    }
-  ]
-}
+# 使用自定义 LLM 客户端
+llm_client = LLMClient(provider="openai")
+parser = LLMMetadataParser(llm_client=llm_client)
+
+metadata = parser.parse("data/experiment.mat", max_attempts=5)
 ```
+
+## 工作流程
+
+```mermaid
+flowchart TD
+    A[get_metadata] --> B[FileMetadataExtractor.extract]
+    B --> C[提取基础信息]
+    C --> D[检测编码/MIME类型]
+    D --> E[生成文件预览]
+    E --> F[LLMMetadataParser.parse_metadata]
+    F --> G[构建提示词]
+    G --> H[LLM 生成解析代码]
+    H --> I[CodeExecutor 执行]
+    I --> J{成功?}
+    J -->|是| K[填充 parsed_content]
+    J -->|否| L{重试次数 < max?}
+    L -->|是| M[LLM 修复代码]
+    M --> I
+    L -->|否| N[返回空 parsed_content]
+    K --> O[返回 FileMetadata]
+    N --> O
+```
+
+## 提示词模板
+
+位于 `prompts/metadata_parser_prompt.py`：
+
+| 模板 | 用途 |
+|------|------|
+| `METADATA_PARSER_USER_PROMPT` | 生成解析代码的主提示词 |
+| `CODE_FIX_PROMPT` | 代码执行失败时的修复提示词 |
+| `CODE_FORMAT_FIX_PROMPT` | 代码格式不正确时的修复提示词 |
+
+### 输出限制
+
+为避免输出过大，LLM 生成的代码会遵循以下限制：
+
+- `sample_values`: 最多 3 个
+- `sample_rows`: 最多 5 行
+- `columns`: 最多展示前 20 列
+- `keys`: 最多展示前 20 个键
 
 ## 注意事项
 
-1. **性能考虑**：对于大型 MAT 文件（>10000 元素），唯一值统计会被跳过（返回 -1）
-2. **内存使用**：CSV/TSV 文件会被完整加载到内存中进行分析
-3. **样本值数量**：每列最多返回 5 个样本值
-4. **编码支持**：CSV/TSV 文件使用 pandas 默认编码（UTF-8）
+1. **首次调用较慢**：需要调用 LLM 生成解析代码
+2. **网络依赖**：需要 LLM API 连接
+3. **自动重试**：代码执行失败会自动修复重试（默认 3 次）
+4. **本地执行**：解析代码在本地 Python 环境执行（非 Docker）
+5. **编码检测**：文本文件使用 chardet 自动检测编码

@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 
 from ...llm import LLMClient
 from app.services.llm.llm_service import LLMService
-from .metadata import DatasetMetadata, DataProcessor
+from .metadata import FileMetadata, LLMMetadataParser, get_metadata
 from .coder import CodeGenerator, CodeTaskResponse
 from .docker_interpreter import DockerCodeInterpreter, CodeExecutionResult
 from .prompts.task_executer import (
@@ -118,12 +118,20 @@ class TaskExecutor:
             self.output_dir = self.data_dir
         
         # 解析所有数据文件的元数据
-        self.metadata_list: List[DatasetMetadata] = []
+        self.metadata_list: List[FileMetadata] = []
+        self.metadata_parser = LLMMetadataParser(llm_client=LLMClient(provider=llm_provider))
+        
         for fp in data_file_paths:
             logger.info(f"正在解析数据文件元数据: {fp}")
-            metadata = DataProcessor.get_metadata(fp)
+            # 使用新的 LLM 元数据解析器
+            metadata = self.metadata_parser.parse(fp)
             self.metadata_list.append(metadata)
-            logger.info(f"元数据解析完成: {metadata.filename} - {metadata.total_rows}行 x {metadata.total_columns}列")
+            
+            # 从 parsed_content 获取统计信息
+            parsed = metadata.parsed_content or {}
+            rows = parsed.get('total_rows', 'N/A')
+            cols = parsed.get('total_columns', 'N/A')
+            logger.info(f"元数据解析完成: {metadata.filename} - {rows}行 x {cols}列")
         
         # 初始化LLM服务
         self.llm_client = LLMClient(provider=llm_provider)
@@ -150,14 +158,23 @@ class TaskExecutor:
         """格式化所有数据集的摘要信息"""
         summaries = []
         for i, metadata in enumerate(self.metadata_list, 1):
+            parsed = metadata.parsed_content or {}
+            total_rows = parsed.get('total_rows', 'N/A')
+            total_columns = parsed.get('total_columns', 'N/A')
+            columns = parsed.get('columns', [])
+            
+            # 构建样例信息
+            sample_info = "; ".join(
+                f"{col.get('name', 'unknown')}: {col.get('sample_values', [])[:3]}"
+                for col in columns[:3]
+                if isinstance(col, dict)
+            ) if columns else "N/A"
+            
             summary = f"""### 数据集 {i}: {metadata.filename}
-- 格式: {metadata.file_format}
-- 行数: {metadata.total_rows}
-- 列数: {metadata.total_columns}
-- 数据样例(sample size: 3*3): {"; ".join(
-            f"{col.name}: {col.sample_values[:3]}"
-            for col in metadata.columns[:3]
-        )}"""
+- 格式: {metadata.file_extension}
+- 行数: {total_rows}
+- 列数: {total_columns}
+- 数据样例(sample size: 3*3): {sample_info}"""
             summaries.append(summary)
         return "\n\n".join(summaries)
 
@@ -536,22 +553,52 @@ class TaskExecutor:
         details = []
         for i, metadata in enumerate(self.metadata_list, 1):
             cols_text = self._format_columns_for_metadata(metadata)
+            parsed = metadata.parsed_content or {}
+            total_rows = parsed.get('total_rows', 'N/A')
+            total_columns = parsed.get('total_columns', 'N/A')
+            shape = parsed.get('shape', None)
+            dtype = parsed.get('dtype', None)
+            
             detail = f"""### 数据集 {i}: {metadata.filename}
-- 格式: {metadata.file_format}
-- 行数: {metadata.total_rows}
-- 列数: {metadata.total_columns}
-- 列信息:
-{cols_text}"""
+- 文件路径: {metadata.file_path}
+- 格式: {metadata.file_extension}
+- 文件大小: {metadata.file_size_bytes} bytes
+- 是否二进制: {metadata.is_binary}
+- 编码: {metadata.encoding or 'N/A'}"""
+            
+            if shape:
+                detail += f"\n- Shape: {shape}"
+            if dtype:
+                detail += f"\n- Data Type: {dtype}"
+            if total_rows != 'N/A':
+                detail += f"\n- 行数: {total_rows}"
+            if total_columns != 'N/A':
+                detail += f"\n- 列数: {total_columns}"
+            if cols_text:
+                detail += f"\n- 列信息:\n{cols_text}"
+            
             details.append(detail)
         return "\n\n".join(details)
 
-    def _format_columns_for_metadata(self, metadata: DatasetMetadata) -> str:
+    def _format_columns_for_metadata(self, metadata: FileMetadata) -> str:
         """格式化单个数据集的列信息"""
         lines = []
-        for col in metadata.columns[:20]:
-            lines.append(f"  - {col.name} ({col.dtype}): 样例值 {col.sample_values[:3]}")
-        if len(metadata.columns) > 20:
-            lines.append(f"  ... (还有 {len(metadata.columns) - 20} 列)")
+        parsed = metadata.parsed_content or {}
+        columns = parsed.get('columns', [])
+        
+        for col in columns[:20]:
+            if isinstance(col, dict):
+                name = col.get('name', 'unknown')
+                dtype = col.get('dtype', 'unknown')
+                sample = col.get('sample_values', [])[:3]
+            else:
+                name = str(col)
+                dtype = 'unknown'
+                sample = []
+            lines.append(f"  - {name} ({dtype}): 样例值 {sample}")
+        
+        if len(columns) > 20:
+            lines.append(f"  ... (还有 {len(columns) - 20} 列)")
         return "\n".join(lines)
 
     def execute(

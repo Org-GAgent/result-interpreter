@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 from ...llm import get_default_client, LLMClient
 from app.services.llm.llm_service import LLMService
 from app.services.skills.skills_loader import SkillsLoader
-from .metadata import DatasetMetadata
+from .metadata import FileMetadata
 from .prompts.coder_prompt import CODER_SYSTEM_PROMPT, CODER_USER_PROMPT_TEMPLATE, CODER_FIX_PROMPT_TEMPLATE
 
 logger = logging.getLogger(__name__)
@@ -69,14 +69,23 @@ class CodeGenerator:
         # 初始化 skills loader
         self._skills_loader = SkillsLoader()
 
-    def _format_columns_for_metadata(self, metadata: DatasetMetadata) -> str:
-        """格式化单个数据集的列信息"""
+    def _format_columns_for_metadata(self, metadata: FileMetadata) -> str:
+        """格式化单个数据集的列信息（从 parsed_content 中提取）"""
         cols_summary = []
-        cols = getattr(metadata, 'columns', [])
+        
+        # 从 parsed_content 中获取列信息
+        parsed = metadata.parsed_content or {}
+        cols = parsed.get('columns', [])
+        
         for col in cols[:20]:  # Limit column context
-            c_name = getattr(col, 'name', str(col))
-            c_type = getattr(col, 'dtype', 'unknown')
-            c_sample = getattr(col, 'sample_values', [])
+            if isinstance(col, dict):
+                c_name = col.get('name', 'unknown')
+                c_type = col.get('dtype', 'unknown')
+                c_sample = col.get('sample_values', [])
+            else:
+                c_name = str(col)
+                c_type = 'unknown'
+                c_sample = []
             cols_summary.append(f"  - {c_name} ({c_type}): {c_sample}")
         
         cols_text = "\n".join(cols_summary)
@@ -84,21 +93,51 @@ class CodeGenerator:
             cols_text += f"\n  ... ({len(cols)-20} more columns)"
         return cols_text
 
-    def _format_datasets(self, metadata_list: List[DatasetMetadata]) -> str:
+    def _format_datasets(self, metadata_list: List[FileMetadata]) -> str:
         """格式化所有数据集的信息"""
         datasets_info = []
         for i, metadata in enumerate(metadata_list, 1):
             cols_text = self._format_columns_for_metadata(metadata)
+            
+            # 从 parsed_content 获取详细信息
+            parsed = metadata.parsed_content or {}
+            total_rows = parsed.get('total_rows', 'N/A')
+            total_columns = parsed.get('total_columns', 'N/A')
+            
+            # 如果是数组数据，显示 shape
+            shape = parsed.get('shape', None)
+            dtype = parsed.get('dtype', None)
+            
             dataset_info = f"""### Dataset {i}: {metadata.filename}
-- Format: {metadata.file_format}
-- Total Rows: {metadata.total_rows}
-- Total Columns: {metadata.total_columns}
-- Columns:
-{cols_text}"""
+- File Path: {metadata.file_path}
+- Format: {metadata.file_extension}
+- File Size: {metadata.file_size_bytes} bytes
+- Is Binary: {metadata.is_binary}
+- Encoding: {metadata.encoding or 'N/A'}"""
+            
+            # 根据文件类型添加不同信息
+            if shape:
+                dataset_info += f"\n- Shape: {shape}"
+            if dtype:
+                dataset_info += f"\n- Data Type: {dtype}"
+            if total_rows != 'N/A':
+                dataset_info += f"\n- Total Rows: {total_rows}"
+            if total_columns != 'N/A':
+                dataset_info += f"\n- Total Columns: {total_columns}"
+            if cols_text:
+                dataset_info += f"\n- Columns:\n{cols_text}"
+            
+            # 添加原始预览信息
+            if metadata.raw_preview:
+                preview = metadata.raw_preview[:500]
+                if len(metadata.raw_preview) > 500:
+                    preview += "\n... (truncated)"
+                dataset_info += f"\n- Preview:\n```\n{preview}\n```"
+            
             datasets_info.append(dataset_info)
         return "\n\n".join(datasets_info)
 
-    def generate(self, metadata_list: List[DatasetMetadata], task_title: str, task_description: str) -> CodeTaskResponse:
+    def generate(self, metadata_list: List[FileMetadata], task_title: str, task_description: str) -> CodeTaskResponse:
         """
         Generates Python code for the given task and data metadata.
         
@@ -108,7 +147,7 @@ class CodeGenerator:
             task_description: 任务描述
         """
         # 兼容单个 metadata 的情况
-        if isinstance(metadata_list, DatasetMetadata):
+        if isinstance(metadata_list, FileMetadata):
             metadata_list = [metadata_list]
         
         datasets_text = self._format_datasets(metadata_list)
@@ -125,7 +164,7 @@ class CodeGenerator:
         response_text = self.llm.chat(prompt=full_prompt)
         return CodeTaskResponse.parse_from_llm_output(response_text)
 
-    def generate_visualization(self, metadata_list: List[DatasetMetadata], task_title: str, task_description: str) -> CodeTaskResponse:
+    def generate_visualization(self, metadata_list: List[FileMetadata], task_title: str, task_description: str) -> CodeTaskResponse:
         """
         生成可视化代码，会自动加载 visualization-generator skill 来增强提示词。
         
@@ -135,7 +174,7 @@ class CodeGenerator:
             task_description: 任务描述（应包含可视化需求）
         """
         # 兼容单个 metadata 的情况
-        if isinstance(metadata_list, DatasetMetadata):
+        if isinstance(metadata_list, FileMetadata):
             metadata_list = [metadata_list]
         
         datasets_text = self._format_datasets(metadata_list)
@@ -162,7 +201,7 @@ class CodeGenerator:
         response_text = self.llm.chat(prompt=full_prompt)
         return CodeTaskResponse.parse_from_llm_output(response_text)
 
-    def fix_code(self, metadata_list: List[DatasetMetadata], task_title: str, task_description: str, code: str, error: str, max_retries: int = 5) -> CodeTaskResponse:
+    def fix_code(self, metadata_list: List[FileMetadata], task_title: str, task_description: str, code: str, error: str, max_retries: int = 5) -> CodeTaskResponse:
         """
         尝试修复代码，最多尝试max_retries次。
         
@@ -178,7 +217,7 @@ class CodeGenerator:
             CodeTaskResponse: 修复后的代码响应
         """
         # 兼容单个 metadata 的情况
-        if isinstance(metadata_list, DatasetMetadata):
+        if isinstance(metadata_list, FileMetadata):
             metadata_list = [metadata_list]
             
         datasets_text = self._format_datasets(metadata_list)
@@ -215,7 +254,7 @@ class CodeGenerator:
         logger.error(f"代码修复失败，已尝试 {max_retries} 次")
         return CodeTaskResponse(code=code, description=f"代码修复失败: 已尝试{max_retries}次")
 
-    def fix_visualization_code(self, metadata_list: List[DatasetMetadata], task_title: str, task_description: str, code: str, error: str, max_retries: int = 5) -> CodeTaskResponse:
+    def fix_visualization_code(self, metadata_list: List[FileMetadata], task_title: str, task_description: str, code: str, error: str, max_retries: int = 5) -> CodeTaskResponse:
         """
         尝试修复可视化代码，会加载 visualization-generator skill。
         
@@ -231,7 +270,7 @@ class CodeGenerator:
             CodeTaskResponse: 修复后的代码响应
         """
         # 兼容单个 metadata 的情况
-        if isinstance(metadata_list, DatasetMetadata):
+        if isinstance(metadata_list, FileMetadata):
             metadata_list = [metadata_list]
             
         datasets_text = self._format_datasets(metadata_list)

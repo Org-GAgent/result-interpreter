@@ -8,7 +8,19 @@ from .plan_execute import (
     NodeExecutionStatus,
     execute_plan
 )
-from .metadata import DatasetMetadata, DataProcessor, ColumnMetadata
+from .metadata import (
+    FileMetadata,
+    FileMetadataExtractor,
+    LLMMetadataParser,
+    get_metadata,
+    get_metadata_parser,
+)
+from .code_executor import (
+    CodeExecutor,
+    ExecutionResult,
+    execute_code,
+    execute_code_with_retry,
+)
 
 __all__ = [
     # Docker interpreter
@@ -29,7 +41,14 @@ __all__ = [
     "NodeExecutionStatus",
     "execute_plan",
     # Metadata
-    "DatasetMetadata",
-    "DataProcessor",
-    "ColumnMetadata",
+    "FileMetadata",
+    "FileMetadataExtractor",
+    "LLMMetadataParser",
+    "get_metadata",
+    "get_metadata_parser",
+    # Code executor
+    "CodeExecutor",
+    "ExecutionResult",
+    "execute_code",
+    "execute_code_with_retry",
 ]

@@ -24,7 +24,7 @@ from app.services.plans.plan_decomposer import PlanDecomposer
 from app.services.plans.tree_simplifier import TreeSimplifier, LLMSimilarityMatcher
 from app.llm import LLMClient
 from .plan_execute import PlanExecutorInterpreter, PlanExecutionResult
-from .metadata import DataProcessor
+from .metadata import get_metadata, FileMetadata
 from .prompts.experiment_design import EXPERIMENT_DESIGN_SYSTEM, EXPERIMENT_DESIGN_USER
 
 logger = logging.getLogger(__name__)
@@ -112,15 +112,33 @@ def run_analysis(
         data_info_parts = []
         for path in data_paths:
             try:
-                meta = DataProcessor.get_metadata(path)
+                meta = get_metadata(path)
                 # 构建元信息文本
                 meta_text = f"文件: {meta.filename}\n"
-                meta_text += f"格式: {meta.file_format}, 大小: {meta.file_size_bytes} bytes\n"
-                meta_text += f"行数: {meta.total_rows}, 列数: {meta.total_columns}\n"
-                if meta.columns:
-                    meta_text += "列信息:\n"
-                    for col in meta.columns[:10]:  # 最多显示10列
-                        meta_text += f"  - {col.name}: {col.dtype}, 样例: {col.sample_values[:3]}\n"
+                meta_text += f"扩展名: {meta.file_extension}, 大小: {meta.file_size_bytes} bytes\n"
+                
+                # 从 parsed_content 中提取信息
+                if meta.parsed_content:
+                    pc = meta.parsed_content
+                    file_type = pc.get("file_type", "unknown")
+                    meta_text += f"类型: {file_type}\n"
+                    
+                    if file_type == "tabular":
+                        meta_text += f"行数: {pc.get('total_rows', 'N/A')}, 列数: {pc.get('total_columns', 'N/A')}\n"
+                        if "columns" in pc:
+                            meta_text += "列信息:\n"
+                            for col in pc["columns"][:10]:  # 最多显示10列
+                                sample = col.get("sample_values", [])[:3]
+                                meta_text += f"  - {col.get('name')}: {col.get('dtype')}, 样例: {sample}\n"
+                    elif file_type == "array":
+                        meta_text += f"形状: {pc.get('shape')}, 类型: {pc.get('dtype')}\n"
+                    elif file_type == "image":
+                        meta_text += f"尺寸: {pc.get('width')}x{pc.get('height')}, 通道: {pc.get('channels')}\n"
+                    elif file_type == "json":
+                        meta_text += f"顶层键: {pc.get('keys', [])[:10]}\n"
+                else:
+                    meta_text += "（元数据解析失败）\n"
+                    
                 data_info_parts.append(meta_text)
             except Exception as e:
                 data_info_parts.append(f"文件: {Path(path).name} (无法读取元信息: {e})")
