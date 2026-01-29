@@ -1,5 +1,5 @@
 ﻿"""
-App entrypoint.
+Demo: CCSN
 """
 import sys
 from pathlib import Path
@@ -13,9 +13,26 @@ from app.run_app import run_app, AppConfig
 
 
 if __name__ == "__main__":
-    # config = AppConfig(
-    #     plan_title="New Project Title",
-    #     data_dir="new_data_dir",
-    #     output_dir="new_output_dir"
-    # )
-    run_app(AppConfig())
+    cfg=AppConfig(
+        plan_title="Gene Expression Data Analysis",
+        data_dir="data",
+        output_dir="test_output/CCSN"
+    )
+    print("=" * 80)
+    print("End-to-end demo - LLM task decomposition + execution")
+    print("=" * 80)
+    print("Flow: decompose tasks -> execute -> generate full report")
+    print("=" * 80)
+    print()
+    output_dir = Path(cfg.output_dir)
+    if output_dir.exists():
+        import shutil
+        shutil.rmtree(output_dir)
+    output_dir.mkdir(parents=True)
+    print(f"OK: output directory cleaned: {output_dir}")
+    print()
+    run_app(cfg)
+    print()
+    print("=" * 80)
+    print("End-to-end demo finished")
+    print("=" * 80)

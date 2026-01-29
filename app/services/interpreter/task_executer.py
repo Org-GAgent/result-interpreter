@@ -25,6 +25,7 @@ from .prompts.task_executer import (
     INFO_GATHERING_SYSTEM_PROMPT,
     INFO_GATHERING_USER_PROMPT_TEMPLATE
 )
+from .image_analyzer import ImageAnalyzer
 from .prompts.data_summary_prompts import (
     ANALYSIS_PLANNING_SYSTEM_PROMPT,
     ANALYSIS_PLANNING_USER_PROMPT_TEMPLATE,
@@ -141,6 +142,7 @@ class TaskExecutor:
                 for fp in data_file_paths:
                     logger.info(f"  - {Path(fp).name}")
 
+
         # 如果没有指定data_dir，使用传统的data_file_paths模式
         elif data_file_paths:
             # 兼容单个文件路径的情况
@@ -189,6 +191,38 @@ class TaskExecutor:
             cols = parsed.get('total_columns', 'N/A')
             logger.info(f"元数据解析完成: {metadata.filename} - {rows}行 x {cols}列")
         
+        
+        # Analyze image files if present (vision model)
+        self.image_descriptions = {}
+        try:
+            api_key = os.getenv("VISION_KEY")
+            base_url = os.getenv("VISION_URL")
+            model = os.getenv("VISION_MODEL")
+            image_analyzer = ImageAnalyzer(api_key=api_key, base_url=base_url, model=model)
+            image_exts = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tif", ".tiff", ".webp"}
+            max_images = int(os.getenv("IMAGE_MAX_COUNT", "5"))
+            count = 0
+            for fp in self.data_file_paths:
+                p = Path(fp)
+                if p.suffix.lower() in image_exts:
+                    desc = image_analyzer.analyze(p, prompt="Describe the image in detail for data analysis context.")
+                    self.image_descriptions[p.name] = desc
+                    count += 1
+                    if count >= max_images:
+                        break
+        except Exception as e:
+            logger.warning(f"Image analysis skipped: {e}")
+
+        if self.image_descriptions:
+            parts = []
+            for name, desc in self.image_descriptions.items():
+                parts.append(f"- {name}: {desc}")
+            image_section = "Image Descriptions:\\n" + "\\n".join(parts)
+            if self.metadata_description:
+                self.metadata_description += "\\n\\n" + image_section
+            else:
+                self.metadata_description = image_section
+
         self.skills_loader = SkillsLoader()
         available_skills_count = len(self.skills_loader._available_skills)
         if available_skills_count > 0:

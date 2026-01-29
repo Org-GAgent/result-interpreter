@@ -4,6 +4,8 @@ Core pipeline: LLM task decomposition -> analysis -> visualization -> report wri
 from dataclasses import dataclass, field
 from pathlib import Path
 import sys
+import os
+from dotenv import load_dotenv
 
 from app.database import init_db
 from app.repository.plan_repository import PlanRepository
@@ -46,14 +48,15 @@ def normalize_task_dependencies(repo: PlanRepository, plan_id: int) -> None:
 
 @dataclass(frozen=True)
 class AppConfig:
-    plan_title: str = "Gene Expression Data Analysis and Paper Writing"
-    data_dir: str = "data"
-    output_dir: str = "test_output/CCSN"
+    plan_title: str = "Result Interpretation"
+    data_dir: str = "new_data_dir"
+    output_dir: str = "new_output_dir"
     llm_provider: str = "qwen"
     interpreter_type: str = "venv"
     readme_filenames: list[str] = field(
         default_factory=lambda: ["README.md", "README.txt", "README.rst", "README"]
     )
+    image_max_count: int = 5
 
 
 def read_readme(data_dir: Path, readme_filenames=None) -> tuple[str, Path]:
@@ -64,7 +67,7 @@ def read_readme(data_dir: Path, readme_filenames=None) -> tuple[str, Path]:
         if readme_path.exists():
             readme_content = readme_path.read_text(encoding="utf-8")
             print(f"OK: read {readme_path} ({len(readme_content)} chars)")
-            print(f"  First 300 chars: {readme_content[:300]}...")
+            # print(f"  First 300 chars: {readme_content[:300]}...")
             print()
             return readme_content, readme_path
     print(f"WARNING: No README found in {data_dir}; falling back to generic strategy")
@@ -110,22 +113,14 @@ Source: {readme_path.as_posix()}
 
 
 def run_app(cfg: AppConfig) -> None:
-    print("=" * 80)
-    print("End-to-end demo - LLM task decomposition + execution")
-    print("=" * 80)
-    print("Flow: decompose tasks -> execute -> generate full report")
-    print("=" * 80)
-    print()
+    load_dotenv()
 
-    # Clean output directory
+    # Pass image analysis config via environment variable
+    if cfg.image_max_count is not None:
+        os.environ["IMAGE_MAX_COUNT"] = str(cfg.image_max_count)
+
+    # Resolve output directory early so it's available for all steps
     output_dir = Path(cfg.output_dir)
-    if output_dir.exists():
-        import shutil
-        shutil.rmtree(output_dir)
-    output_dir.mkdir(parents=True)
-
-    print(f"OK: output directory cleaned: {output_dir}")
-    print()
 
     # Initialize database
     print("Initializing database...")
@@ -301,24 +296,5 @@ def run_app(cfg: AppConfig) -> None:
 
         traceback.print_exc()
         sys.exit(1)
-
-    # ============================================================
-    # Final summary
-    # ============================================================
-    print()
-    print("=" * 80)
-    print("End-to-end demo finished")
-    print("=" * 80)
-
-    print("\nThis demo shows:")
-    print("  1. LLM automatically decomposes goals into tasks")
-    print("  2. The system executes all tasks end-to-end")
-    print("  3. A full analysis report is generated")
-    print("  4. Skills provide professional guidance")
-
-    print("\nCheck the generated report for:")
-    print("  - Statistical analyses")
-    print("  - Visualization figures")
-    print("  - Experimental results section")
 
     print(f"\nOutput directory: {output_dir}")

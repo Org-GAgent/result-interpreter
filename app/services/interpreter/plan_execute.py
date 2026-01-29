@@ -22,6 +22,7 @@ from app.repository.plan_repository import PlanRepository
 from app.services.plans.plan_models import PlanNode, PlanTree
 from app.services.plans.tree_simplifier import TreeSimplifier, DAG, DAGNode
 from .task_executer import TaskExecutor, TaskExecutionResult, TaskType
+from .image_analyzer import ImageAnalyzer
 
 logger = logging.getLogger(__name__)
 
@@ -533,6 +534,10 @@ class PlanExecutorInterpreter:
                 block.append(f"**Execution Output**:{record.code_output[:10000]}")
             if record.text_response:
                 block.append(f"**Text Result**: {record.text_response[:10000]}")
+            if record.visualization_purpose:
+                block.append(f"**Visualization Purpose**: {record.visualization_purpose}")
+            if record.visualization_analysis:
+                block.append(f"**Visualization Analysis**: {record.visualization_analysis}")
             if record.generated_files:
                 block.append(f"**Generated Files**: {', '.join(record.generated_files)}")
                 image_files = [
@@ -657,6 +662,36 @@ class PlanExecutorInterpreter:
         # 更新记录
         record.task_type = result.task_type
         record.generated_files = new_files
+        vision_analysis_text = None
+        # If visualization files were generated, use vision model to produce analysis text
+        if new_files:
+            image_files = [
+                f for f in new_files
+                if f.lower().endswith((".png", ".jpg", ".jpeg", ".svg", ".pdf"))
+            ]
+            if image_files:
+                try:
+                    api_key = os.getenv("VISION_KEY")
+                    base_url = os.getenv("VISION_URL")
+                    model = os.getenv("VISION_MODEL")
+                    if api_key:
+                        analyzer = ImageAnalyzer(api_key=api_key, base_url=base_url, model=model)
+                        analyses = []
+                        for img in image_files:
+                            img_path = self.output_dir / img
+                            if not img_path.exists():
+                                continue
+                            vision_text = analyzer.analyze(
+                                img_path,
+                                prompt="Analyze the chart and summarize key patterns with concrete observations.",
+                            )
+                            if vision_text:
+                                analyses.append(f"[{img}]\\n{vision_text}")
+                        if analyses:
+                            vision_analysis_text = "\\n\\n".join(analyses)
+                except Exception as e:
+                    logger.warning(f"Vision analysis skipped: {e}")
+
         self._all_generated_files.extend(new_files)
         
         if result.success:
@@ -670,7 +705,7 @@ class PlanExecutorInterpreter:
                 # 保存可视化相关字段
                 record.has_visualization = result.has_visualization
                 record.visualization_purpose = result.visualization_purpose
-                record.visualization_analysis = result.visualization_analysis
+                record.visualization_analysis = vision_analysis_text or result.visualization_analysis
             elif result.task_type == TaskType.DATA_SUMMARY:
                 # data_summary任务可能有代码和文字输出
                 record.code = result.final_code
@@ -679,7 +714,7 @@ class PlanExecutorInterpreter:
                 record.text_response = result.text_response
                 record.has_visualization = result.has_visualization
                 record.visualization_purpose = result.visualization_purpose
-                record.visualization_analysis = result.visualization_analysis
+                record.visualization_analysis = vision_analysis_text or result.visualization_analysis
             else:
                 record.text_response = result.text_response
 
