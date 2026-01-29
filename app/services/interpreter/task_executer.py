@@ -126,7 +126,8 @@ class TaskExecutor:
             self.data_dir = str(data_dir_path)
 
             # Auto-discover all files in the data directory (no extension restriction)
-            discovered_files = [f for f in data_dir_path.iterdir() if f.is_file()]
+            discovered_files = [p for p in data_dir_path.rglob('*') if p.is_file()]
+
 
             # Exclude common documentation files
             data_file_paths = [
