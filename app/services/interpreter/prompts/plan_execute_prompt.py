@@ -1,12 +1,6 @@
+﻿"""
+Plan execution prompt templates.
 """
-计划执行器的提示词模板
-
-包含报告生成和图表分析的系统提示词和用户提示词模板。
-"""
-
-# ============================================================
-# 报告生成提示词
-# ============================================================
 
 REPORT_GENERATION_SYSTEM_PROMPT = """You are a professional data analyst and report writer. Your task is to synthesize the execution results of a data analysis plan into a comprehensive, insightful report.
 
@@ -42,7 +36,7 @@ REPORT_GENERATION_USER_PROMPT_TEMPLATE = """## Analysis Plan Information
 ## Data Source
 
 **File**: {data_filename}
-**Size**: {data_rows} rows × {data_columns} columns
+**Size**: {data_rows} rows x {data_columns} columns
 
 ## Execution Summary
 
@@ -74,10 +68,6 @@ Based on all the above information, please write a comprehensive analysis report
 
 The report should be professional, data-driven, and accessible to readers who may not be technical experts.
 """
-
-# ============================================================
-# 图表分析提示词
-# ============================================================
 
 FIGURE_ANALYSIS_SYSTEM_PROMPT = """You are a data visualization expert. Your task is to analyze a generated figure based on the context of how it was created.
 
@@ -119,10 +109,6 @@ Please analyze this figure based on the context above. Provide:
 
 Be specific and reference actual values from the code output where available.
 """
-
-# ============================================================
-# 子任务汇总提示词（用于非叶子节点）
-# ============================================================
 
 SUBTASK_SUMMARY_SYSTEM_PROMPT = """You are a task coordinator. Your role is to synthesize the results from multiple sub-tasks into a coherent summary for the parent task.
 

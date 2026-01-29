@@ -6,10 +6,12 @@ example/
 .env
 .env.old
 *.env
+*.ps1
 web-ui/.env
 web-ui/.env.development
 web-ui/node_modules
 .vscode/*
+.claude/*
 direct_plans/*
 results/*
 docs/plans/*
@@ -20,4 +22,7 @@ scripts/*
 app/services/interpreter/results/
 app/services/interpreter/test/results/
 data/
+data2/
+test_output/
+*.zip
 

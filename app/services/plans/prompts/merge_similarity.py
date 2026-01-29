@@ -1,76 +1,31 @@
+﻿"""
+Task merge similarity prompts.
 """
-节点合并相似度判断提示词
-"""
 
-MERGE_SIMILARITY_SYSTEM = """你是一个任务分析专家，负责判断两个任务节点是否可以合并。
+MERGE_SIMILARITY_SYSTEM = """You are a task merge assistant. Your job is to determine whether two tasks are similar enough to merge.
 
-【可以合并的情况】
-1. 两个任务执行完全相同的操作（相同的方法、相同的参数配置）
-2. 只是因为输入数据不同而重复创建的任务
-3. 任务名称和指令实质上完全一致
-
-【不能合并的情况 - 非常重要】
-1. 使用不同算法或方法的任务（如：GEM聚类 vs CNDM聚类 → 不能合并）
-2. 处理不同类型数据的任务（如：基因表达分析 vs 蛋白质分析）
-3. 任务名称中包含不同的专有名词、方法名、算法名
-4. 即使目的相似，但具体实现方式不同的任务
-5. 任何含有不同缩写/专业术语的任务（如：PCA vs t-SNE, K-Means vs DBSCAN）
-
-【判断要点】
-- 仔细检查任务名称和指令中的关键词差异
-- 不同的方法名（GEM, CNDM, PCA, K-Means等）意味着不同任务
-- 宁可不合并，也不要错误合并不同功能的任务
-
-输出格式：仅输出 JSON，无其他文字
+Return only JSON with this schema:
 {
-    "can_merge": true/false,
-    "similarity": 0.0-1.0,
-    "reason": "简短原因"
-}"""
+  "decision": "merge" or "keep",
+  "reason": "short explanation"
+}
+"""
 
-MERGE_SIMILARITY_USER = """判断以下两个任务节点是否可以合并：
+MERGE_SIMILARITY_USER = """You will be given two tasks. Decide whether they are semantically similar enough to merge.
 
-【任务1】
-- ID: {id1}
-- 名称: {name1}
-- 指令: {instruction1}
+Task A:
+{task_a}
 
-【任务2】
-- ID: {id2}
-- 名称: {name2}
-- 指令: {instruction2}
+Task B:
+{task_b}
+"""
 
-注意：如果两个任务使用不同的方法/算法（如GEM vs CNDM），即使都是"聚类分析"也不能合并。
-请仔细对比任务名称和指令中的关键差异。"""
+BATCH_SIMILARITY_SYSTEM = """You are a task merge assistant. You will be given multiple tasks and need to group similar tasks.
+Return only JSON.
+"""
 
-
-BATCH_SIMILARITY_SYSTEM = """你是一个任务分析专家，负责从一组任务中找出可以合并的任务对。
-
-【可以合并的条件】
-1. 两个任务执行完全相同的操作（相同方法、相同配置）
-2. 任务名称和指令实质上完全一致，只是重复创建
-
-【不能合并的情况】
-1. 使用不同算法/方法的任务（GEM vs CNDM, PCA vs t-SNE 等）
-2. 处理不同类型数据的任务
-3. 任务名称包含不同的专业术语或方法名
-4. 即使类别相似（都是"聚类"），但具体方法不同则不能合并
-
-【重要】宁可漏报，也不要错误地将不同功能的任务标记为可合并。
-
-输出格式：仅输出 JSON 数组，无其他文字
-[
-    {"id1": 1, "id2": 2, "similarity": 0.95, "reason": "原因"},
-    ...
-]
-
-只返回相似度 >= 0.9 且确实可以合并的任务对。如果没有，返回空数组 []。"""
-
-BATCH_SIMILARITY_USER = """分析以下任务列表，找出可以合并的任务对：
+BATCH_SIMILARITY_USER = """Below are multiple tasks. Group tasks that are similar enough to merge.
+Return JSON with groups as lists of task IDs.
 
 {nodes_text}
-
-注意：
-- 不同方法（如GEM、CNDM、PCA等）的任务不能合并
-- 只有执行完全相同操作的任务才能合并
-- 仔细检查任务名称中的关键词差异"""
+"""

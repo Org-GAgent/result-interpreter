@@ -115,36 +115,47 @@ class PlanExecutorInterpreter:
     def __init__(
         self,
         plan_id: int,
-        data_file_paths: List[str],
+        data_file_paths: Optional[List[str]] = None,
+        data_dir: Optional[str] = None,
         output_dir: str = "./results",
         llm_provider: str = "qwen",
         docker_image: str = "agent-plotter",
         docker_timeout: int = 120,
+        interpreter_type: str = "docker",
+        venv_path: Optional[str] = None,
         repo: Optional[PlanRepository] = None
     ):
         """
         初始化计划执行器
-        
+
         Args:
             plan_id: 计划ID
             data_file_paths: 数据文件路径列表（支持多个文件）
+                           如果指定了 data_dir，则此参数可选
+            data_dir: 数据目录路径，系统会自动发现该目录下的所有数据文件
+                     优先使用此参数，如果不指定则使用 data_file_paths
             output_dir: 输出目录（存放生成的文件和报告）
             llm_provider: LLM提供商
             docker_image: Docker镜像
-            docker_timeout: Docker超时时间
+            docker_timeout: 执行超时时间
+            interpreter_type: 代码执行器类型（"docker"或"venv"）
+            venv_path: Python虚拟环境路径（当interpreter_type="venv"时使用）
             repo: PlanRepository实例（可选，默认创建新实例）
         """
         self.plan_id = plan_id
+
         # 兼容单个文件路径的情况
-        if isinstance(data_file_paths, str):
+        if data_file_paths and isinstance(data_file_paths, str):
             data_file_paths = [data_file_paths]
+
         self.data_file_paths = data_file_paths
+        self.data_dir = data_dir
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        
+
         # 初始化仓库
         self.repo = repo or PlanRepository()
-        
+
         # 加载计划树
         logger.info(f"加载计划树: plan_id={plan_id}")
         self.tree: PlanTree = self.repo.get_plan_tree(plan_id)
@@ -154,54 +165,89 @@ class PlanExecutorInterpreter:
         simplifier = TreeSimplifier()
         self.dag: DAG = simplifier.tree_to_dag(self.tree)
         try:
-            # 使用反向拓扑排序：先执行叶子节点（子任务），再执行父节点
-            self._topo_order: List[int] = self.dag.topological_sort(reverse=True)
-            logger.info(f"DAG拓扑顺序（叶子→根）: {self._topo_order}")
+            # Prefer dependency-based order if dependencies exist
+            dep_edges = []
+            for nid, node in self.tree.nodes.items():
+                for dep_id in (node.dependencies or []):
+                    dep_edges.append((dep_id, nid))
+
+            if dep_edges:
+                # Kahn topological sort over dependency edges (dep -> node)
+                nodes = sorted(self.tree.nodes.keys())
+                indeg = {n: 0 for n in nodes}
+                adj = {n: [] for n in nodes}
+                for dep_id, nid in dep_edges:
+                    if dep_id in indeg and nid in indeg:
+                        adj[dep_id].append(nid)
+                        indeg[nid] += 1
+
+                queue = [n for n in nodes if indeg[n] == 0]
+                order = []
+                while queue:
+                    current = queue.pop(0)
+                    order.append(current)
+                    for nxt in adj[current]:
+                        indeg[nxt] -= 1
+                        if indeg[nxt] == 0:
+                            queue.append(nxt)
+
+                if len(order) == len(nodes):
+                    self._topo_order = order
+                    logger.info(f"Dependency order (deps->tasks): {self._topo_order}")
+                else:
+                    raise ValueError("cycle in dependency graph")
+            else:
+                # Fall back to reverse DAG order (leaves -> root)
+                self._topo_order = self.dag.topological_sort(reverse=True)
+                logger.info(f"DAG topological order (leaves->root): {self._topo_order}")
         except ValueError as e:
-            logger.warning(f"DAG拓扑排序失败: {e}，使用节点ID顺序")
+            logger.warning(f"Topological order failed: {e}, using node id order")
             self._topo_order = sorted(self.dag.nodes.keys())
-        
-        # 初始化TaskExecutor（用于执行单个任务）
-        # 传递 output_dir 以确保生成的文件保存到正确位置
+
+        # Initialize TaskExecutor for executing individual tasks
         self.task_executor = TaskExecutor(
             data_file_paths=data_file_paths,
+            data_dir=data_dir,
             llm_provider=llm_provider,
             docker_image=docker_image,
             docker_timeout=docker_timeout,
-            output_dir=str(self.output_dir)  # Docker生成的文件将保存在此目录
+            output_dir=str(self.output_dir),
+            interpreter_type=interpreter_type,
+            venv_path=venv_path,
         )
-        
-        # 初始化LLM服务（用于生成报告）
+
+        # LLM service for report generation
         self.llm_client = LLMClient(provider=llm_provider)
         self.llm_service = LLMService(client=self.llm_client)
-        
-        # 执行状态跟踪
+
+        # Execution tracking
         self._node_status: Dict[int, NodeExecutionStatus] = {}
         self._node_records: Dict[int, NodeExecutionRecord] = {}
         self._all_generated_files: List[str] = []
-        
-        # 分析报告路径
+
+        # Analysis report path
         self._analysis_report_path = self._init_analysis_report()
+
 
     def _init_analysis_report(self) -> Path:
         """初始化分析报告 Markdown 文件"""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         report_filename = f"analysis_report_plan{self.plan_id}_{timestamp}.md"
         report_path = self.output_dir / report_filename
-        
-        # 创建报告头部
-        header = f"""# 数据分析报告
 
-**计划ID**: {self.plan_id}
-**计划标题**: {self.tree.title}
-**生成时间**: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+        # 创建报告头部
+        header = f"""# Data Analysis Report
+
+**Plan ID**: {self.plan_id}
+**Plan Title**: {self.tree.title}
+**Generated Time**: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 
 ---
 
 """
         with open(report_path, 'w', encoding='utf-8') as f:
             f.write(header)
-        
+
         logger.info(f"分析报告已创建: {report_path}")
         return report_path
 
@@ -224,26 +270,26 @@ class PlanExecutorInterpreter:
         
         # 构建报告内容
         content_parts = []
-        content_parts.append(f"\n## 任务: {record.node_name}\n")
-        content_parts.append(f"**任务ID**: {record.node_id}\n")
-        content_parts.append(f"**执行时间**: {record.completed_at}\n\n")
-        
+        content_parts.append(f"\n## Task: {record.node_name}\n")
+        content_parts.append(f"**Task ID**: {record.node_id}\n")
+        content_parts.append(f"**Execution Time**: {record.completed_at}\n\n")
+
         # 添加可视化目的
         if record.visualization_purpose:
-            content_parts.append("### 分析目的\n\n")
+            content_parts.append("### Analysis Purpose\n\n")
             content_parts.append(f"{record.visualization_purpose}\n\n")
-        
+
         # 添加图表（new_files 已经是相对路径格式 results/xxx.png）
         if image_files:
-            content_parts.append("### 生成的图表\n\n")
+            content_parts.append("### Generated Figures\n\n")
             for img_path in image_files:
                 img_name = Path(img_path).name
                 # img_path 已经是相对路径 results/xxx.png，直接使用
                 content_parts.append(f"![{img_name}]({img_path})\n\n")
-        
+
         # 添加可视化分析
         if record.visualization_analysis:
-            content_parts.append("### 图表分析\n\n")
+            content_parts.append("### Figure Analysis\n\n")
             content_parts.append(f"{record.visualization_analysis}\n\n")
         
         # 添加分隔线
@@ -254,6 +300,103 @@ class PlanExecutorInterpreter:
             f.write(''.join(content_parts))
         
         logger.info(f"已将任务 [{record.node_id}] 的可视化分析添加到报告")
+
+    def _append_text_to_report(self, record: NodeExecutionRecord):
+        """
+        将文字分析内容追加到分析报告（用于data_summary和text_only任务）
+
+        Args:
+            record: 节点执行记录
+        """
+        if not record.text_response or not record.text_response.strip():
+            logger.info(f"任务 [{record.node_id}] 没有文字内容需要添加到报告")
+            return
+
+        # 构建报告内容
+        content_parts = []
+        content_parts.append(f"\n## Task: {record.node_name}\n")
+        content_parts.append(f"**Task ID**: {record.node_id}\n")
+        content_parts.append(f"**Task Type**: {record.task_type.value if record.task_type else 'N/A'}\n")
+        content_parts.append(f"**Execution Time**: {record.completed_at}\n\n")
+
+        # 添加文字内容
+        content_parts.append("### Analysis Results\n\n")
+        content_parts.append(f"{record.text_response}\n\n")
+
+        # 添加分隔线
+        content_parts.append("---\n")
+
+        # 追加到报告文件
+        with open(self._analysis_report_path, 'a', encoding='utf-8') as f:
+            f.write(''.join(content_parts))
+
+        logger.info(f"已将任务 [{record.node_id}] 的文字分析添加到报告")
+
+    def _append_code_output_to_report(self, record: NodeExecutionRecord):
+        """
+        将代码执行输出添加到分析报告（用于有输出但无可视化的code_required任务）
+
+        Args:
+            record: 节点执行记录
+        """
+        if not record.code_output or not record.code_output.strip():
+            logger.info(f"任务 [{record.node_id}] 没有代码输出需要添加到报告")
+            return
+
+        # 构建报告内容
+        content_parts = []
+        content_parts.append(f"\n## Task: {record.node_name}\n")
+        content_parts.append(f"**Task ID**: {record.node_id}\n")
+        content_parts.append(f"**Task Type**: {record.task_type.value if record.task_type else 'N/A'}\n")
+        content_parts.append(f"**Execution Time**: {record.completed_at}\n\n")
+
+        # 添加代码描述（如果有）
+        if record.code_description:
+            content_parts.append("### Description\n\n")
+            content_parts.append(f"{record.code_description}\n\n")
+
+        # 添加代码输出
+        content_parts.append("### Execution Output\n\n")
+        content_parts.append(f"```\n{record.code_output}\n```\n\n")
+
+        # 添加分隔线
+        content_parts.append("---\n")
+
+        # 追加到报告文件
+        with open(self._analysis_report_path, 'a', encoding='utf-8') as f:
+            f.write(''.join(content_parts))
+
+        logger.info(f"已将任务 [{record.node_id}] 的代码输出添加到报告")
+
+    def _append_empty_task_to_report(self, record: NodeExecutionRecord):
+        """
+        为没有生成内容的任务添加占位符信息到报告
+
+        Args:
+            record: 节点执行记录
+        """
+        content_parts = []
+        content_parts.append(f"\n## Task: {record.node_name}\n")
+        content_parts.append(f"**Task ID**: {record.node_id}\n")
+        content_parts.append(f"**Task Type**: {record.task_type.value if record.task_type else 'N/A'}\n")
+        content_parts.append(f"**Execution Time**: {record.completed_at}\n\n")
+
+        # 添加说明
+        content_parts.append("### Status\n\n")
+        content_parts.append("✅ Task completed successfully, but no output was generated for the report.\n\n")
+
+        if record.code_output:
+            content_parts.append("### Execution Output\n\n")
+            content_parts.append(f"```\n{record.code_output[:500]}\n```\n\n")
+
+        # 添加分隔线
+        content_parts.append("---\n")
+
+        # 追加到报告文件
+        with open(self._analysis_report_path, 'a', encoding='utf-8') as f:
+            f.write(''.join(content_parts))
+
+        logger.info(f"已为任务 [{record.node_id}] 添加占位符信息到报告")
 
     def _get_children_ids(self, node_id: int) -> List[int]:
         """获取节点的所有子节点ID"""
@@ -365,64 +508,62 @@ class PlanExecutorInterpreter:
 
     def _collect_dependency_context(self, node_id: int) -> str:
         """
-        收集依赖节点的执行结果作为上下文
-        
-        在任务树中，执行顺序是从叶子到根：
-        - 子节点（child_ids）先执行，结果作为当前节点的输入
-        - 显式依赖（dependencies）的结果也需要收集
-        
-        收集内容：
-        1. 子节点（child_ids）的执行结果（主要上下文来源）
-        2. 显式依赖（dependencies）的执行结果
+        Collect dependency and child execution results as context.
+
+        Execution flows from leaves to root:
+        - Child nodes run first, their results feed into the parent node.
+        - Explicit dependencies also provide context.
         """
-        context_parts = []
-        collected_ids = set()
-        
-        # 获取 DAG 节点
+        tree_node = self.tree.nodes.get(node_id)
+        if not tree_node:
+            return ""
+
         dag_node = self.dag.nodes.get(node_id)
         if not dag_node:
             return ""
-        
-        tree_node = self.tree.nodes.get(node_id)
-        
-        # 1. 收集子节点的结果（子任务先执行，结果作为输入）
+
+        context_parts: List[str] = []
+        collected_ids: Set[int] = set()
+
+        def _add_record_context(label: str, record: NodeExecutionRecord) -> str:
+            block = [f"### {label} [{record.node_id}] {record.node_name}"]
+            if record.code_description:
+                block.append(f"**Analysis Summary**: {record.code_description}")
+            if record.code_output:
+                block.append(f"**Execution Output**:{record.code_output[:10000]}")
+            if record.text_response:
+                block.append(f"**Text Result**: {record.text_response[:10000]}")
+            if record.generated_files:
+                block.append(f"**Generated Files**: {', '.join(record.generated_files)}")
+                image_files = [
+                    f for f in record.generated_files
+                    if f.lower().endswith((".png", ".jpg", ".jpeg", ".svg", ".pdf"))
+                ]
+                if image_files:
+                    block.append("**Available Figures (for citation in papers)**:")
+                    for i, img in enumerate(image_files, 1):
+                        block.append(f"  - Figure {i}: {img}")
+            return "".join(block)
+
+        # Explicit dependencies first
+        for dep_id in (tree_node.dependencies or []):
+            if dep_id in collected_ids:
+                continue
+            record = self._node_records.get(dep_id)
+            if record and record.status == NodeExecutionStatus.COMPLETED:
+                collected_ids.add(dep_id)
+                context_parts.append(_add_record_context("Dependency Task", record))
+
+        # Child tasks
         for child_id in dag_node.child_ids:
             if child_id in collected_ids:
                 continue
             record = self._node_records.get(child_id)
             if record and record.status == NodeExecutionStatus.COMPLETED:
                 collected_ids.add(child_id)
-                child_context = f"\n### 子任务 [{child_id}] {record.node_name}\n"
-                if record.code_description:
-                    child_context += f"**分析内容**: {record.code_description}\n"
-                if record.code_output:
-                    child_context += f"**执行输出**:\n```\n{record.code_output[:2000]}\n```\n"
-                if record.text_response:
-                    child_context += f"**文本结果**: {record.text_response[:2000]}\n"
-                if record.generated_files:
-                    child_context += f"**生成文件**: {', '.join(record.generated_files)}\n"
-                context_parts.append(child_context)
-        
-        # 2. 收集显式依赖的结果
-        if tree_node:
-            for dep_id in (tree_node.dependencies or []):
-                if dep_id in collected_ids:
-                    continue
-                record = self._node_records.get(dep_id)
-                if record and record.status == NodeExecutionStatus.COMPLETED:
-                    collected_ids.add(dep_id)
-                    dep_context = f"\n### 依赖任务 [{dep_id}] {record.node_name}\n"
-                    if record.code_description:
-                        dep_context += f"**分析内容**: {record.code_description}\n"
-                    if record.code_output:
-                        dep_context += f"**执行输出**:\n```\n{record.code_output[:2000]}\n```\n"
-                    if record.text_response:
-                        dep_context += f"**文本结果**: {record.text_response[:2000]}\n"
-                    if record.generated_files:
-                        dep_context += f"**生成文件**: {', '.join(record.generated_files)}\n"
-                    context_parts.append(dep_context)
-        
-        return "\n".join(context_parts)
+                context_parts.append(_add_record_context("Child Task", record))
+
+        return "".join(context_parts)
 
     def _scan_generated_files(self) -> List[str]:
         """
@@ -487,6 +628,12 @@ class PlanExecutorInterpreter:
         
         # 记录执行前的文件
         files_before = set(self._scan_generated_files())
+
+        # 从节点metadata中读取task_type（如果有的话）
+        force_task_type = None
+        if node.metadata and isinstance(node.metadata, dict):
+            force_task_type = node.metadata.get("task_type")
+
         
         # 判断是否为可视化任务：
         # 1. 如果节点 metadata 中有 is_visualization 标记则使用该值
@@ -498,6 +645,8 @@ class PlanExecutorInterpreter:
             task_title=node.name,
             task_description=task_description,
             subtask_results=dependency_context,  # 传递依赖结果给信息收集和任务执行阶段
+            force_task_type=force_task_type,  # 传递任务类型（如果指定）
+            skip_info_gathering=True,  # 在智能模式下跳过信息收集，避免路径错误
             is_visualization=is_visualization
         )
         
@@ -522,19 +671,47 @@ class PlanExecutorInterpreter:
                 record.has_visualization = result.has_visualization
                 record.visualization_purpose = result.visualization_purpose
                 record.visualization_analysis = result.visualization_analysis
+            elif result.task_type == TaskType.DATA_SUMMARY:
+                # data_summary任务可能有代码和文字输出
+                record.code = result.final_code
+                record.code_output = result.code_output
+                record.code_description = result.code_description
+                record.text_response = result.text_response
+                record.has_visualization = result.has_visualization
+                record.visualization_purpose = result.visualization_purpose
+                record.visualization_analysis = result.visualization_analysis
             else:
                 record.text_response = result.text_response
-            
+
             logger.info(f"节点 [{node_id}] 执行成功")
-            
-            # 如果有可视化或者生成了图片文件，更新分析报告
-            # 条件放宽：有可视化标记，或者有新生成的图片文件
+
+            # 添加内容到分析报告
             image_extensions = {'.png', '.jpg', '.jpeg', '.svg', '.pdf'}
             has_image_files = any(Path(f).suffix.lower() in image_extensions for f in new_files)
-            
+
+            # 检查是否有任何内容需要添加到报告
+            has_content = False
+
+            # 如果有可视化，添加可视化内容
             if record.has_visualization or has_image_files:
                 logger.info(f"检测到可视化内容: has_visualization={record.has_visualization}, has_image_files={has_image_files}")
                 self._append_visualization_to_report(record, new_files)
+                has_content = True
+            # 如果有文字响应（data_summary或text_only），添加文字内容
+            elif record.text_response and record.text_response.strip():
+                logger.info(f"检测到文字分析内容，添加到报告")
+                self._append_text_to_report(record)
+                has_content = True
+            # 如果有代码输出（code_required任务），也添加到报告
+            elif record.code_output and record.code_output.strip():
+                logger.info(f"检测到代码执行输出，添加到报告")
+                self._append_code_output_to_report(record)
+                has_content = True
+
+            # 如果什么都没有，添加一个占位符说明
+            if not has_content:
+                logger.warning(f"任务 [{node_id}] 完成但没有任何输出")
+                self._append_empty_task_to_report(record)
         else:
             record.status = NodeExecutionStatus.FAILED
             self._node_status[node_id] = NodeExecutionStatus.FAILED
@@ -746,16 +923,16 @@ class PlanExecutorInterpreter:
     def _finalize_analysis_report(self, completed: int, failed: int, skipped: int):
         """完成分析报告，添加执行总结"""
         summary = f"""
-## 执行总结
+## Execution Summary
 
-| 指标 | 数值 |
-|------|------|
-| 总任务数 | {len(self.tree.nodes)} |
-| 完成 | {completed} |
-| 失败 | {failed} |
-| 跳过 | {skipped} |
+| Metric | Value |
+|--------|-------|
+| Total Tasks | {len(self.tree.nodes)} |
+| Completed | {completed} |
+| Failed | {failed} |
+| Skipped | {skipped} |
 
-**完成时间**: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+**Completion Time**: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 """
         with open(self._analysis_report_path, 'a', encoding='utf-8') as f:
             f.write(summary)
