@@ -132,7 +132,7 @@ class TaskExecutor:
             # Exclude common documentation files
             data_file_paths = [
                 str(f) for f in discovered_files
-                if not any(keyword in f.name.lower() for keyword in ['readme', 'license', 'changelog'])
+                if f.suffix.lower() != ".zip" and not any(keyword in f.name.lower() for keyword in ['readme', 'license', 'changelog'])
             ]
 
             if not data_file_paths:
