@@ -8,6 +8,7 @@
 import os
 import json
 import logging
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Set
@@ -66,6 +67,7 @@ class NodeExecutionRecord:
     # 时间戳
     started_at: Optional[str] = None
     completed_at: Optional[str] = None
+    duration_seconds: Optional[float] = None
 
 
 @dataclass
@@ -91,6 +93,7 @@ class PlanExecutionResult:
     # 执行时间
     started_at: Optional[str] = None
     completed_at: Optional[str] = None
+    duration_seconds: Optional[float] = None
 
 
 class PlanExecutorInterpreter:
@@ -229,6 +232,29 @@ class PlanExecutorInterpreter:
         # Analysis report path
         self._analysis_report_path = self._init_analysis_report()
 
+    @staticmethod
+    def _calc_duration_seconds(started_at: Optional[str], completed_at: Optional[str]) -> Optional[float]:
+        if not started_at or not completed_at:
+            return None
+        try:
+            start_dt = datetime.fromisoformat(started_at)
+            end_dt = datetime.fromisoformat(completed_at)
+            return (end_dt - start_dt).total_seconds()
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _format_duration(seconds: Optional[float]) -> str:
+        if seconds is None:
+            return "N/A"
+        if seconds < 60:
+            return f"{seconds:.2f}s"
+        minutes, sec = divmod(seconds, 60)
+        if minutes < 60:
+            return f"{int(minutes)}m {sec:.2f}s"
+        hours, minutes = divmod(minutes, 60)
+        return f"{int(hours)}h {int(minutes)}m {sec:.2f}s"
+
 
     def _init_analysis_report(self) -> Path:
         """初始化分析报告 Markdown 文件"""
@@ -268,17 +294,29 @@ class PlanExecutorInterpreter:
         if not image_files and not record.visualization_purpose and not record.visualization_analysis:
             logger.info(f"任务 [{record.node_id}] 没有可视化内容需要添加到报告")
             return
+
+        def _demote_visual_headings(text: str) -> str:
+            """Demote headings so visualization narrative stays under Figure sections."""
+            if not text:
+                return text
+            lines = []
+            for line in text.splitlines():
+                line = re.sub(r'^(#{1,6})(\s+)', r'#\1\2', line)
+                lines.append(line)
+            return "\n".join(lines)
         
         # 构建报告内容
         content_parts = []
         content_parts.append(f"\n## Task: {record.node_name}\n")
         content_parts.append(f"**Task ID**: {record.node_id}\n")
-        content_parts.append(f"**Execution Time**: {record.completed_at}\n\n")
+        content_parts.append(f"**Started At**: {record.started_at}\n")
+        content_parts.append(f"**Completed At**: {record.completed_at}\n")
+        content_parts.append(f"**Duration**: {self._format_duration(record.duration_seconds)}\n\n")
 
         # 添加可视化目的
         if record.visualization_purpose:
             content_parts.append("### Analysis Purpose\n\n")
-            content_parts.append(f"{record.visualization_purpose}\n\n")
+            content_parts.append(f"{_demote_visual_headings(record.visualization_purpose.strip())}\n\n")
 
         # 添加图表（new_files 已经是相对路径格式 results/xxx.png）
         if image_files:
@@ -291,7 +329,7 @@ class PlanExecutorInterpreter:
         # 添加可视化分析
         if record.visualization_analysis:
             content_parts.append("### Figure Analysis\n\n")
-            content_parts.append(f"{record.visualization_analysis}\n\n")
+            content_parts.append(f"{_demote_visual_headings(record.visualization_analysis.strip())}\n\n")
         
         # 添加分隔线
         content_parts.append("---\n")
@@ -313,16 +351,29 @@ class PlanExecutorInterpreter:
             logger.info(f"任务 [{record.node_id}] 没有文字内容需要添加到报告")
             return
 
+        def _demote_task_headings(text: str) -> str:
+            """Demote top-level headings to keep task output nested under Task sections."""
+            if not text:
+                return text
+            lines = []
+            for line in text.splitlines():
+                line = re.sub(r'^(#{1,6})(\s+)', r'##\1\2', line)
+                lines.append(line)
+            return "\n".join(lines)
+
         # 构建报告内容
         content_parts = []
         content_parts.append(f"\n## Task: {record.node_name}\n")
         content_parts.append(f"**Task ID**: {record.node_id}\n")
         content_parts.append(f"**Task Type**: {record.task_type.value if record.task_type else 'N/A'}\n")
-        content_parts.append(f"**Execution Time**: {record.completed_at}\n\n")
+        content_parts.append(f"**Started At**: {record.started_at}\n")
+        content_parts.append(f"**Completed At**: {record.completed_at}\n")
+        content_parts.append(f"**Duration**: {self._format_duration(record.duration_seconds)}\n\n")
 
         # 添加文字内容
         content_parts.append("### Analysis Results\n\n")
-        content_parts.append(f"{record.text_response}\n\n")
+        normalized_text = _demote_task_headings(record.text_response.strip())
+        content_parts.append(f"{normalized_text}\n\n")
 
         # 添加分隔线
         content_parts.append("---\n")
@@ -349,7 +400,9 @@ class PlanExecutorInterpreter:
         content_parts.append(f"\n## Task: {record.node_name}\n")
         content_parts.append(f"**Task ID**: {record.node_id}\n")
         content_parts.append(f"**Task Type**: {record.task_type.value if record.task_type else 'N/A'}\n")
-        content_parts.append(f"**Execution Time**: {record.completed_at}\n\n")
+        content_parts.append(f"**Started At**: {record.started_at}\n")
+        content_parts.append(f"**Completed At**: {record.completed_at}\n")
+        content_parts.append(f"**Duration**: {self._format_duration(record.duration_seconds)}\n\n")
 
         # 添加代码描述（如果有）
         if record.code_description:
@@ -380,7 +433,9 @@ class PlanExecutorInterpreter:
         content_parts.append(f"\n## Task: {record.node_name}\n")
         content_parts.append(f"**Task ID**: {record.node_id}\n")
         content_parts.append(f"**Task Type**: {record.task_type.value if record.task_type else 'N/A'}\n")
-        content_parts.append(f"**Execution Time**: {record.completed_at}\n\n")
+        content_parts.append(f"**Started At**: {record.started_at}\n")
+        content_parts.append(f"**Completed At**: {record.completed_at}\n")
+        content_parts.append(f"**Duration**: {self._format_duration(record.duration_seconds)}\n\n")
 
         # 添加说明
         content_parts.append("### Status\n\n")
@@ -719,6 +774,8 @@ class PlanExecutorInterpreter:
                 record.text_response = result.text_response
 
             logger.info(f"节点 [{node_id}] 执行成功")
+            record.completed_at = datetime.now().isoformat()
+            record.duration_seconds = self._calc_duration_seconds(record.started_at, record.completed_at)
 
             # 添加内容到分析报告
             image_extensions = {'.png', '.jpg', '.jpeg', '.svg', '.pdf'}
@@ -752,8 +809,11 @@ class PlanExecutorInterpreter:
             self._node_status[node_id] = NodeExecutionStatus.FAILED
             record.error_message = result.error_message or result.code_error
             logger.error(f"节点 [{node_id}] 执行失败: {record.error_message}")
-        
-        record.completed_at = datetime.now().isoformat()
+
+        if not record.completed_at:
+            record.completed_at = datetime.now().isoformat()
+        if record.duration_seconds is None:
+            record.duration_seconds = self._calc_duration_seconds(record.started_at, record.completed_at)
         self._node_records[node_id] = record
         
         # 更新数据库中的节点状态
@@ -930,9 +990,10 @@ class PlanExecutorInterpreter:
         skipped_count = sum(1 for s in self._node_status.values() if s == NodeExecutionStatus.SKIPPED)
         
         completed_at = datetime.now().isoformat()
+        plan_duration_seconds = self._calc_duration_seconds(started_at, completed_at)
         
         # 完成分析报告（添加总结部分）
-        self._finalize_analysis_report(completed_count, failed_count, skipped_count)
+        self._finalize_analysis_report(completed_count, failed_count, skipped_count, started_at, completed_at, plan_duration_seconds)
         
         # 构建结果
         result = PlanExecutionResult(
@@ -947,7 +1008,8 @@ class PlanExecutorInterpreter:
             all_generated_files=self._all_generated_files,
             report_path=str(self._analysis_report_path),
             started_at=started_at,
-            completed_at=completed_at
+            completed_at=completed_at,
+            duration_seconds=plan_duration_seconds
         )
         
         logger.info(f"计划执行完成: 成功={result.success}, 完成={completed_count}, 失败={failed_count}")
@@ -955,7 +1017,15 @@ class PlanExecutorInterpreter:
         
         return result
 
-    def _finalize_analysis_report(self, completed: int, failed: int, skipped: int):
+    def _finalize_analysis_report(
+        self,
+        completed: int,
+        failed: int,
+        skipped: int,
+        started_at: str,
+        completed_at: str,
+        duration_seconds: Optional[float]
+    ):
         """完成分析报告，添加执行总结"""
         summary = f"""
 ## Execution Summary
@@ -967,7 +1037,9 @@ class PlanExecutorInterpreter:
 | Failed | {failed} |
 | Skipped | {skipped} |
 
-**Completion Time**: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+**Started At**: {started_at}
+**Completed At**: {completed_at}
+**Duration**: {self._format_duration(duration_seconds)}
 """
         with open(self._analysis_report_path, 'a', encoding='utf-8') as f:
             f.write(summary)
