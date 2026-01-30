@@ -16,7 +16,7 @@ if __name__ == "__main__":
     cfg=AppConfig(
         plan_title="Gene Expression Data Analysis",
         data_dir="data",
-        output_dir="test_output/CCSN"
+        output_dir="output"
     )
     print("=" * 80)
     print("End-to-end demo - LLM task decomposition + execution")

@@ -23,6 +23,7 @@ app/services/interpreter/results/
 app/services/interpreter/test/results/
 data/
 data2/
+output/
 test_output/
 *.zip
-
+tasks.db
